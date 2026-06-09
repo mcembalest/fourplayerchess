@@ -50,6 +50,20 @@ Validated: 2-gen load, decay=0.5 sampled 3644/~3646 expected rows.
 Next levers: batched leaf eval (GEMM), lazy legality (needs sign-off), migrate
 gen data into data/buffer/ tags and rerun the gen-3 iterate with accumulation.
 
+| E9 | **gen-4: buffer accumulation** (g3 93k + g4 87k rows, both from gen2b/champion teachers, TD λ=0.65, bootstrap=champion, decay=1) | pnet4 1274 vs **champ4 1242 (direct h2h)**, paranoid4 1278 | 200g/d4, arena now seats challenger+champion in one pool (`arena ... model2.bin`). +32 = within noise → **no champion change; gen2b stays.** |
+
+**E9 findings:** (1) 2× data from the SAME teacher generation ≠ the accumulation
+the plateau called for — pre-gen3 diverse data was overwritten before the buffer
+existed; real test needs ≥2 distinct teacher gens in the buffer (start tagging
+every gen from now on). (2) **Metric break:** killer+ID move ordering made
+paranoid4 itself much stronger (tie-breaks by shallow search instead of capture
+order; material eval ties constantly, net eval doesn't). pnet4−paranoid4
+value-add is NOT comparable across the search change — at d4 it's now ~0.
+Use direct challenger-vs-champ4 h2h (same pool, same conditions) going forward.
+(3) Open question for next session: does the net leaf still add anything over
+material at d4 under the improved search, and does the answer flip at d6 (now
+affordable: d4 search is 3.2× cheaper)?
+
 ### Search track (paranoid alpha-beta = me vs. the field, scalar my-share)
 | # | agent | elo | notes |
 |---|-------|----:|-------|

@@ -1,7 +1,10 @@
 //! Arena: run many seat-rotated games between a pool of agents (in parallel)
 //! and print an Elo-style leaderboard.
 //!
-//!   cargo run -p fpc-arena --release -- [num_games] [max_steps]
+//!   cargo run -p fpc-arena --release -- [num_games] [max_steps] [model.bin?] [depth] [model2.bin?]
+//!
+//! With a second model, its paranoid-d agent joins the pool as `champ<d>` —
+//! direct same-conditions head-to-head between challenger and champion.
 //!
 //! Elo is derived by decomposing each 4-player game into pairwise placement
 //! results (the leaner, well-understood path; a proper multiplayer model like
@@ -71,6 +74,15 @@ fn main() {
             label: format!("pnet{depth}"),
         });
         eprintln!("loaded net from {path}");
+    }
+    if let Some(path) = args.get(5) {
+        let net2 = std::sync::Arc::new(Net::load(path).expect("load model2"));
+        pool.push(AgentKind::ParanoidNet {
+            net: net2,
+            depth,
+            label: format!("champ{depth}"),
+        });
+        eprintln!("loaded head-to-head net from {path}");
     }
     eprintln!("paranoid depth = {depth}");
 
