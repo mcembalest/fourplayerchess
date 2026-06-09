@@ -1,0 +1,10 @@
+# Rust build artifacts
+/target/
+
+# Generated training data (regenerable via fpc-train; X.bin exceeds GitHub's 100MB limit)
+# NOTE: data/model.bin is intentionally NOT ignored — it is include_bytes!'d into fpc-wasm.
+/data/X.bin
+/data/Y.bin
+
+# macOS
+.DS_Store

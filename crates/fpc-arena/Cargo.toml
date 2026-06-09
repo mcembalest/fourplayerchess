@@ -1,0 +1,13 @@
+[package]
+name = "fpc-arena"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+fpc-core = { path = "../fpc-core" }
+fpc-agents = { path = "../fpc-agents" }
+rayon = "1"
+
+[[bin]]
+name = "arena"
+path = "src/main.rs"

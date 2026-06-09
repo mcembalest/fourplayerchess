@@ -1,0 +1,7 @@
+[package]
+name = "fpc-agents"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+fpc-core = { path = "../fpc-core" }

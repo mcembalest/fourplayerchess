@@ -1,0 +1,7 @@
+[workspace]
+resolver = "2"
+members = ["crates/fpc-core", "crates/fpc-agents", "crates/fpc-arena", "crates/fpc-train", "crates/fpc-wasm"]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
