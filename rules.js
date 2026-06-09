@@ -233,7 +233,8 @@ function makeMove(mv){
   const b=G.board;
   const p=b[mv.fr][mv.fc];
   const cap=b[mv.tr][mv.tc];
-  if(cap) G.scores[p.color]+=VALUE[cap.type];
+  // dead pieces (owner already eliminated) are worth 0; live captures score material
+  if(cap && !G.eliminated.has(cap.color)) G.scores[p.color]+=VALUE[cap.type];
   // draw clock: reset on any capture or any pawn move (incl. promotion), else +1
   G.noProgress = (cap || p.type==="P") ? 0 : G.noProgress+1;
   applyTo(b,mv);

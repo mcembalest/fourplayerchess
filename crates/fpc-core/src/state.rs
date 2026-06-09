@@ -146,7 +146,10 @@ impl State {
         let p = self.board[mv.fr as usize][mv.fc as usize].expect("no piece at source");
         let cap = self.board[mv.tr as usize][mv.tc as usize];
         if let Some(cap) = cap {
-            self.scores[p.color.idx()] += value(cap.kind);
+            // dead pieces (owner already eliminated) are worth 0; live captures score material
+            if !self.eliminated[cap.color.idx()] {
+                self.scores[p.color.idx()] += value(cap.kind);
+            }
         }
         // no-progress counter resets on a capture or any pawn move (incl. promotion);
         // `p` is the piece before promotion, matching rules.js.
