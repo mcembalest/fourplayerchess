@@ -5,3 +5,7 @@ members = ["crates/fpc-core", "crates/fpc-agents", "crates/fpc-arena", "crates/f
 [workspace.package]
 edition = "2021"
 version = "0.1.0"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1

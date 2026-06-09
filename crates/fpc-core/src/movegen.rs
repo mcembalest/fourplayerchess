@@ -54,18 +54,75 @@ pub fn piece_attacks(b: &Board, p: Piece, pr: i32, pc: i32, tr: i32, tc: i32) ->
     }
 }
 
-/// Is (tr,tc) attacked by any active piece not of `def_color`?
+/// Bounds-safe cell read (None when off the 14x14 grid).
+#[inline]
+fn cell_at(b: &Board, r: i32, c: i32) -> Cell {
+    if r < 0 || r > 13 || c < 0 || c > 13 {
+        return None;
+    }
+    b[r as usize][c as usize]
+}
+
+/// Is (tr,tc) attacked by any active piece not of `def_color`? Looks OUTWARD from
+/// the target (reverse leaper/ray lookup, ~40 probes) instead of scanning all 196
+/// cells. Validated equivalent to the full scan by tests/diff.rs.
 pub fn attacked(b: &Board, elim: &[bool; 4], tr: i32, tc: i32, def_color: Color) -> bool {
-    for r in 0..N as i32 {
-        for c in 0..N as i32 {
-            if let Some(p) = at(b, r, c) {
-                if p.color == def_color || elim[p.color.idx()] {
-                    continue;
-                }
-                if piece_attacks(b, p, r, c, tr, tc) {
+    let is_enemy = |p: Piece| p.color != def_color && !elim[p.color.idx()];
+    // knight attackers
+    for &(dr, dc) in KNIGHT.iter() {
+        if let Some(p) = cell_at(b, tr + dr, tc + dc) {
+            if p.kind == Kind::N && is_enemy(p) {
+                return true;
+            }
+        }
+    }
+    // king attackers (adjacent)
+    for &(dr, dc) in ALL8.iter() {
+        if let Some(p) = cell_at(b, tr + dr, tc + dc) {
+            if p.kind == Kind::K && is_enemy(p) {
+                return true;
+            }
+        }
+    }
+    // pawn attackers: an enemy pawn of colour `e` attacks (tr,tc) iff it sits at
+    // (tr-cdr, tc-cdc) for one of e's capture offsets.
+    for &e in ORDER.iter() {
+        if e == def_color || elim[e.idx()] {
+            continue;
+        }
+        for &(cdr, cdc) in pawn_caps(e).iter() {
+            if let Some(p) = cell_at(b, tr - cdr, tc - cdc) {
+                if p.kind == Kind::P && p.color == e {
                     return true;
                 }
             }
+        }
+    }
+    // sliders: walk each ray; first piece blocks. Orthogonal => R/Q, diagonal => B/Q.
+    for &(dr, dc) in ORTH.iter() {
+        let (mut r, mut c) = (tr + dr, tc + dc);
+        while is_playable(r, c) {
+            if let Some(p) = at(b, r, c) {
+                if is_enemy(p) && (p.kind == Kind::R || p.kind == Kind::Q) {
+                    return true;
+                }
+                break;
+            }
+            r += dr;
+            c += dc;
+        }
+    }
+    for &(dr, dc) in DIAG.iter() {
+        let (mut r, mut c) = (tr + dr, tc + dc);
+        while is_playable(r, c) {
+            if let Some(p) = at(b, r, c) {
+                if is_enemy(p) && (p.kind == Kind::B || p.kind == Kind::Q) {
+                    return true;
+                }
+                break;
+            }
+            r += dr;
+            c += dc;
         }
     }
     false
@@ -237,11 +294,29 @@ pub fn apply_to(b: &mut Board, mv: Move) {
 }
 
 pub fn legal_moves(b: &Board, elim: &[bool; 4], color: Color) -> Vec<Move> {
-    let mut out: Vec<Move> = Vec::new();
-    for mv in pseudo_moves(b, elim, color) {
-        let mut nb = *b;
+    let pseudo = pseudo_moves(b, elim, color);
+    let mut out: Vec<Move> = Vec::with_capacity(pseudo.len());
+    // Work on one mutable copy with make/unmake (restore the ≤2 touched cells)
+    // instead of cloning the whole board per pseudo-move. King square is found
+    // once: it only moves on a king move (then it's the destination).
+    let mut nb = *b;
+    let king = find_king(b, color);
+    for mv in pseudo {
+        let from = nb[mv.fr as usize][mv.fc as usize];
+        let to = nb[mv.tr as usize][mv.tc as usize];
         apply_to(&mut nb, mv);
-        if !king_attacked(&nb, elim, color) {
+        let ksq = if king == Some((mv.fr, mv.fc)) {
+            Some((mv.tr, mv.tc))
+        } else {
+            king
+        };
+        let safe = match ksq {
+            Some((kr, kc)) => !attacked(&nb, elim, kr, kc, color),
+            None => false, // no king == treat as in check (matches king_attacked)
+        };
+        nb[mv.fr as usize][mv.fc as usize] = from;
+        nb[mv.tr as usize][mv.tc as usize] = to;
+        if safe {
             out.push(mv);
         }
     }
