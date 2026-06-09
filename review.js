@@ -258,6 +258,14 @@ document.getElementById("rvPrev").addEventListener("click", ()=>rvSetPly(rvPly-1
 document.getElementById("rvNext").addEventListener("click", ()=>rvSetPly(rvPly+1));
 document.getElementById("rvLast").addEventListener("click", ()=>rvSetPly(rvData.N));
 document.getElementById("rvSlider").addEventListener("input", e=>rvSetPly(+e.target.value));
+// left/right arrows step back/forward through game states while the review is open
+document.addEventListener("keydown", e=>{
+  if(e.key!=="ArrowLeft" && e.key!=="ArrowRight") return;
+  if(!rvData) return;
+  if(document.getElementById("reviewOverlay").classList.contains("hidden")) return;
+  e.preventDefault();                         // don't also nudge a focused slider / scroll the page
+  rvSetPly(rvPly + (e.key==="ArrowRight" ? 1 : -1));
+});
 {
   const ob=document.getElementById("overlayReview");
   if(ob) ob.addEventListener("click", ()=>{ hideOverlay(); openReview(); });

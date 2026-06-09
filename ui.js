@@ -11,6 +11,7 @@ const boardEl = document.getElementById("board");
 /* ---------- the rules->UI hook (called by advanceTurn in rules.js) ---------- */
 function onAdvance(){
   if(window.__rvSilent) return;   // review.js replays moves on a scratch state; don't render/dispatch bots
+  viewPly=-1;                     // a new move/turn snaps the board back to the live position
   render();
   if(G.over){ showGameOver(); return; }
   if(G.current && G.current!==HUMAN) setTimeout(botMove,380);
@@ -151,26 +152,30 @@ function renderBoard(){
   if(destCell) slidePiece(destCell, mv);
 }
 
-/* Slide the just-moved piece from its origin square into place (FLIP). */
-const SLIDE_MS = 200;
-function slidePiece(destCell, mv){
+/* Slide the piece now sitting in `cell` so it appears to travel from (fromR,fromC)
+   into place over `ms` (FLIP). Used for live moves and, at 2x speed, history scrubbing. */
+const SLIDE_MS  = 200;
+const REWIND_MS = SLIDE_MS / 2;        // history scrub animates at double speed
+function slideInto(cell, fromR, fromC, toR, toC, ms){
   if(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-  const piece = destCell.querySelector(".piece");
+  const piece = cell.querySelector(".piece");
   if(!piece) return;
   const size = boardEl.clientWidth/14;
-  const dx = (mv.fc - mv.tc) * size;   // start offset back toward the origin
-  const dy = (mv.fr - mv.tr) * size;
+  const dx = (fromC - toC) * size;     // start offset back toward the source square
+  const dy = (fromR - toR) * size;
   if(!dx && !dy) return;
   piece.style.transition = "none";
   piece.style.transform = `translate(${dx}px, ${dy}px)`;
   piece.style.zIndex = "5";            // ride above the pieces it passes over
   void piece.getBoundingClientRect();  // force the start frame to commit
   requestAnimationFrame(()=>{
-    piece.style.transition = `transform ${SLIDE_MS}ms ease-out`;
+    piece.style.transition = `transform ${ms}ms ease-out`;
     piece.style.transform = "translate(0, 0)";
   });
   piece.addEventListener("transitionend", ()=>{ piece.style.zIndex=""; piece.style.transition=""; }, {once:true});
 }
+function slidePiece(destCell, mv){ slideInto(destCell, mv.fr, mv.fc, mv.tr, mv.tc, SLIDE_MS); }
+function cellAt(r,c){ return boardEl.children[r*14 + c]; }   // cells appended row-major, incl. blocked
 
 function showGameOver(){
   const ranked=ORDER.slice().sort((a,b)=>G.scores[b]-G.scores[a]);
@@ -185,8 +190,93 @@ function showGameOver(){
 }
 function hideOverlay(){ document.getElementById("overlay").classList.add("hidden"); }
 
+/* ---------- history scrubbing (left/right arrows step through past plies) ----------
+   viewPly = -1 means "follow the live game"; otherwise it's an index into G.snapshots
+   and the board is shown read-only. Stepping forward onto the latest ply returns to
+   live, interactive play. */
+let viewPly = -1;
+function lastPly(){ return (G.snapshots ? G.snapshots.length : 1) - 1; }
+function viewingHistory(){ return viewPly>=0 && viewPly<lastPly(); }
+
+function stepView(delta){
+  if(!G.snapshots || G.snapshots.length<2) return;   // nothing to scrub yet
+  const last = lastPly();
+  const from = (viewPly<0 ? last : viewPly);
+  const k = Math.max(0, Math.min(last, from + delta));
+  if(k===from) return;                                // already at an end
+  if(k===last){                                       // caught up to live -> normal board
+    viewPly=-1; render();
+    const m=G.history[last-1];                        // replay the latest move into place (2x)
+    if(m){ const cell=cellAt(m.tr,m.tc); if(cell) slideInto(cell, m.fr,m.fc, m.tr,m.tc, REWIND_MS); }
+    return;
+  }
+  viewPly = k;
+  renderHistoryPly(k, from);
+}
+
+function renderHistoryPly(k, from){
+  const snap = G.snapshots[k];
+  const board = parseBoard(snap.board);
+  const elim  = new Set(snap.eliminated.map(s=>s[0]));
+  const mv    = k>0 ? G.history[k-1] : null;          // the move that reached this ply
+  const cur   = snap.current;                         // who was to move at this ply
+  const checkPos = (cur && kingAttacked(board,elim,cur)) ? findKing(board,cur) : null;
+
+  boardEl.innerHTML="";
+  for(let r=0;r<14;r++)for(let c=0;c<14;c++){
+    const cell=document.createElement("div");
+    if(!isPlayable(r,c)){ cell.className="cell blocked"; boardEl.appendChild(cell); continue; }
+    let cls="cell "+(((r+c)%2)?"dark":"light");
+    if(mv&&((mv.fr===r&&mv.fc===c)||(mv.tr===r&&mv.tc===c))) cls+=" last";
+    if(checkPos&&checkPos[0]===r&&checkPos[1]===c) cls+=" check";
+    cell.className=cls;
+    const p=board[r][c];
+    if(p){
+      const colorCls=elim.has(p.color)?"dead":"p-"+p.color;
+      cell.insertAdjacentHTML("beforeend",
+        `<svg class="piece ${colorCls}" viewBox="0 0 45 45"><use href="#pc-${p.type}"/></svg>`);
+    }
+    cell.addEventListener("click",()=>onClick(r,c));   // onClick is a no-op while viewing history
+    boardEl.appendChild(cell);
+  }
+  // animate the one piece that differs from the previously-shown ply, at 2x speed
+  if(from!=null && from!==k){
+    if(k>from){                       // stepped forward: replay move that reached ply k
+      const m=G.history[k-1];
+      if(m){ const cell=cellAt(m.tr,m.tc); if(cell) slideInto(cell, m.fr,m.fc, m.tr,m.tc, REWIND_MS); }
+    }else{                            // stepped back: un-move the move that reached ply k+1
+      const m=G.history[k];
+      if(m){ const cell=cellAt(m.fr,m.fc); if(cell) slideInto(cell, m.tr,m.tc, m.fr,m.fc, REWIND_MS); }
+    }
+  }
+  renderHistoryPanel(snap,elim,cur,board);
+  const el=document.getElementById("status");
+  const where = k===0 ? "Start position" : `Move ${k} of ${lastPly()}`;
+  el.innerHTML = `${where} · history — <b>←</b> prev · <b>→</b> next (→ to return to live)`;
+}
+
+function renderHistoryPanel(snap,elim,cur,board){
+  const el=document.getElementById("panel");
+  el.innerHTML="";
+  for(const c of ORDER){
+    const card=document.createElement("div");
+    card.className="pcard"+(c===cur?" active":"")+(elim.has(c)?" out":"");
+    let tag="";
+    if(elim.has(c)) tag="out";
+    else if(c===cur) tag="to move";
+    else if(kingAttacked(board,elim,c)) tag="in check";
+    card.innerHTML=
+      `<span class="swatch" style="background:var(--${NAME[c].toLowerCase()})"></span>`+
+      `<span class="nm">${NAME[c]}${c===HUMAN?" (you)":""}</span>`+
+      (tag?`<span class="tag">${tag}</span>`:"")+
+      `<span class="sc">${snap.scores[c]}</span>`;
+    el.appendChild(card);
+  }
+}
+
 /* ---------- input ---------- */
 function onClick(r,c){
+  if(viewingHistory()) return;    // board is read-only while scrubbing past plies
   if(G.over||G.current!==HUMAN) return;
   const b=G.board;
   if(G.selected){
@@ -217,5 +307,15 @@ document.getElementById("overlayNew").addEventListener("click",uiNewGame);
 document.getElementById("difficulty").addEventListener("change",updateEngineStatus);
 document.addEventListener("engine-ready",updateEngineStatus);
 document.addEventListener("engine-failed",updateEngineStatus);
+// left/right arrows scrub the main board through game history
+document.addEventListener("keydown", e=>{
+  if(e.key!=="ArrowLeft" && e.key!=="ArrowRight") return;
+  // while an overlay is open, leave the keys to it (review has its own scrubber)
+  if(!document.getElementById("reviewOverlay").classList.contains("hidden")) return;
+  if(!document.getElementById("overlay").classList.contains("hidden")) return;
+  if(!G.snapshots || G.snapshots.length<2) return;
+  e.preventDefault();
+  stepView(e.key==="ArrowRight" ? 1 : -1);
+});
 updateEngineStatus();
 uiNewGame();
