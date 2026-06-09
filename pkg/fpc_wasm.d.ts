@@ -5,7 +5,11 @@ export function fpc_analyze(history_json: string, level: number): string;
 
 export function fpc_attack_map(pos_json: string, color: string): string;
 
-export function fpc_best_move(pos_json: string, level: number): string;
+/**
+ * `seed` is JS-supplied entropy (e.g. Math.random()) so move selection — and the
+ * temperature sampling — varies per call; pass the same seed to reproduce a move.
+ */
+export function fpc_best_move(pos_json: string, level: number, seed: number): string;
 
 export function fpc_eval(pos_json: string): string;
 
@@ -22,7 +26,7 @@ export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly fpc_new_game: () => [number, number];
     readonly fpc_legal_moves: (a: number, b: number) => [number, number];
-    readonly fpc_best_move: (a: number, b: number, c: number) => [number, number];
+    readonly fpc_best_move: (a: number, b: number, c: number, d: number) => [number, number];
     readonly fpc_eval: (a: number, b: number) => [number, number];
     readonly fpc_analyze: (a: number, b: number, c: number) => [number, number];
     readonly fpc_attack_map: (a: number, b: number, c: number, d: number) => [number, number];

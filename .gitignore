@@ -1,13 +1,21 @@
 # Rust build artifacts
 /target/
 
-# Generated training data (regenerable via fpc-train; X.bin exceeds GitHub's 100MB limit)
-# NOTE: data/model.bin is intentionally NOT ignored — it is include_bytes!'d into fpc-wasm.
-/data/X.bin
-/data/Y.bin
+# Generated training data + intermediate model checkpoints (regenerable via
+# fpc-train). Only champion.bin is tracked — it's include_bytes!'d into fpc-wasm.
+/data/*.bin
+!/data/champion.bin
 
 # Inter-agent comms scratch
 /comms/
 
 # macOS
 .DS_Store
+
+# bench compiled artifacts
+bench/bench_rust
+bench/bench_go
+bench/.venv
+bench/bench_c
+bench/bench_goengine
+bench/bench_engine_c

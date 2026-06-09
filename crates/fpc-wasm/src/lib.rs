@@ -10,7 +10,9 @@
 //!   fpc_attack_map(pos_json, color) -> 196-char "0"/"1"
 //!
 //! Difficulty levels (engine agents, add-only numbering):
-//!   0=Heuristic, 1=Search(2), 2=Net, 3=Random.
+//!   0=Heuristic, 1=Search(2), 2=Net, 3=Random, 4=ParanoidNet d4 (strongest).
+//! fpc_best_move samples among near-best moves (per-level temperature) seeded by
+//! a JS-supplied `seed`, so games vary; fpc_analyze stays deterministic.
 //! The UI labels these by *measured* strength, not by number.
 
 use std::sync::{Arc, OnceLock};
@@ -20,7 +22,9 @@ use fpc_core::*;
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
-const MODEL_BYTES: &[u8] = include_bytes!("../../../data/model.bin");
+// The shipped champion net (a stable file, NOT data/model.bin which the trainer
+// overwrites). Promote a new champion by copying it to data/champion.bin.
+const MODEL_BYTES: &[u8] = include_bytes!("../../../data/champion.bin");
 
 fn net() -> Arc<Net> {
     static NET: OnceLock<Arc<Net>> = OnceLock::new();
@@ -141,14 +145,31 @@ fn eval_state(st: &State) -> [f64; 4] {
 
 /* ---------- agents by difficulty level ---------- */
 
-fn agent_for(level: u32) -> Box<dyn Agent> {
-    let kind = match level {
+fn kind_for(level: u32) -> AgentKind {
+    match level {
         0 => AgentKind::Heuristic,
         1 => AgentKind::Search(2),
         3 => AgentKind::Random,
+        4 => AgentKind::ParanoidNet { net: net(), depth: 4, label: "pnet4".into() }, // strongest
         _ => AgentKind::Net { net: net(), label: "net".into() }, // 2 = Net (default)
-    };
-    kind.build(0xA9)
+    }
+}
+
+/// Per-level selection temperature for *live play* — sample among near-best moves
+/// so games don't replay the identical opening every time (variety high early
+/// when many moves are ~equal, ~deterministic once one move clearly dominates).
+/// Heuristic/Random ignore temp (Heuristic already has scoring noise).
+fn live_temp(level: u32) -> f64 {
+    match level {
+        1 => 0.15, // search2
+        2 => 0.15, // net
+        4 => 0.12, // pnet4 (strongest — small temp keeps it sharp)
+        _ => 0.0,
+    }
+}
+
+fn agent_for(level: u32, seed: u64, temp: f64) -> Box<dyn Agent> {
+    kind_for(level).build_temp(seed, temp)
 }
 
 /* ---------- exports ---------- */
@@ -174,8 +195,10 @@ pub fn fpc_legal_moves(pos_json: &str) -> String {
     serde_json::to_string(&moves).unwrap()
 }
 
+/// `seed` is JS-supplied entropy (e.g. Math.random()) so move selection — and the
+/// temperature sampling — varies per call; pass the same seed to reproduce a move.
 #[wasm_bindgen]
-pub fn fpc_best_move(pos_json: &str, level: u32) -> String {
+pub fn fpc_best_move(pos_json: &str, level: u32, seed: f64) -> String {
     let st = match parse_pos(pos_json) {
         Ok(s) => s,
         Err(e) => return err(&e),
@@ -183,7 +206,8 @@ pub fn fpc_best_move(pos_json: &str, level: u32) -> String {
     if st.current_legal.is_empty() {
         return "null".into();
     }
-    let mut agent = agent_for(level);
+    let su = seed.to_bits() ^ (level as u64).wrapping_mul(0x9E3779B97F4A7C15);
+    let mut agent = agent_for(level, su, live_temp(level));
     let mv: MoveJson = agent.select(&st).into();
     serde_json::to_string(&mv).unwrap()
 }
@@ -203,7 +227,8 @@ pub fn fpc_analyze(history_json: &str, level: u32) -> String {
         Ok(h) => h,
         Err(e) => return err(&e.to_string()),
     };
-    let mut agent = agent_for(level);
+    // Deterministic (temp=0, fixed seed): review must show the true best move.
+    let mut agent = agent_for(level, 0xA9, 0.0);
     let mut st = State::new_game();
     let mut out: Vec<AnalyzePly> = Vec::new();
 
@@ -317,7 +342,7 @@ mod tests {
     #[test]
     fn best_move_is_legal() {
         let pkt = start_packet();
-        let out = fpc_best_move(&pkt, 0);
+        let out = fpc_best_move(&pkt, 0, 0.5);
         let mv: MoveJson = serde_json::from_str(&out).unwrap();
         let legal: Vec<MoveJson> = serde_json::from_str(&fpc_legal_moves(&pkt)).unwrap();
         assert!(
