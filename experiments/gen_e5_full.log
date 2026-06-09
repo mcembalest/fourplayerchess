@@ -1,0 +1,87 @@
+distillation self-play: paranoid d4 teachers, net from data/model_e4.bin
+progress: 12/240 games
+progress: 24/240 games
+progress: 36/240 games
+progress: 48/240 games
+progress: 60/240 games
+progress: 72/240 games
+progress: 84/240 games
+progress: 96/240 games
+progress: 108/240 games
+progress: 120/240 games
+progress: 132/240 games
+progress: 144/240 games
+progress: 156/240 games
+progress: 168/240 games
+progress: 180/240 games
+progress: 192/240 games
+progress: 204/240 games
+progress: 216/240 games
+progress: 228/240 games
+progress: 240/240 games
+wrote 52476 positions from 240 games (FEAT_DIM=52) -> data/{X,Y,lens}.bin
+computed TD(λ=0.65) targets from bootstrap data/model_e4.bin
+epoch   0  mse 0.03585
+epoch   1  mse 0.00225
+epoch   2  mse 0.00158
+epoch   3  mse 0.00127
+epoch   4  mse 0.00108
+epoch   5  mse 0.00095
+epoch   6  mse 0.00086
+epoch   7  mse 0.00079
+epoch   8  mse 0.00074
+epoch   9  mse 0.00070
+epoch  10  mse 0.00066
+epoch  11  mse 0.00063
+epoch  12  mse 0.00060
+epoch  13  mse 0.00059
+epoch  14  mse 0.00056
+epoch  15  mse 0.00055
+epoch  16  mse 0.00053
+epoch  17  mse 0.00052
+epoch  18  mse 0.00050
+epoch  19  mse 0.00050
+epoch  20  mse 0.00049
+epoch  21  mse 0.00048
+epoch  22  mse 0.00047
+epoch  23  mse 0.00047
+epoch  24  mse 0.00045
+epoch  25  mse 0.00045
+epoch  26  mse 0.00044
+epoch  27  mse 0.00044
+epoch  28  mse 0.00043
+epoch  29  mse 0.00042
+wrote data/model.bin (52476 rows trained, λ=0.65)
+=== ARENA E5 (depth 4) ===
+loaded net from data/model_e5.bin
+paranoid depth = 4
+progress: 10/200 games
+progress: 20/200 games
+progress: 30/200 games
+progress: 40/200 games
+progress: 50/200 games
+progress: 60/200 games
+progress: 70/200 games
+progress: 80/200 games
+progress: 90/200 games
+progress: 100/200 games
+progress: 110/200 games
+progress: 120/200 games
+progress: 130/200 games
+progress: 140/200 games
+progress: 150/200 games
+progress: 160/200 games
+progress: 170/200 games
+progress: 180/200 games
+progress: 190/200 games
+progress: 200/200 games
+200 games, max 250 plies each
+
+agent          seats  avg_rank  avg_score     elo
+pnet4            112     1.589      70.56    1323
+paranoid4        114     1.816      63.81    1263
+heuristic        116     2.103      47.62    1146
+search2          121     2.388      43.42    1037
+netsearch2        92     2.837      31.78     895
+net              120     3.033      27.48     801
+random           125     3.600       9.24     535

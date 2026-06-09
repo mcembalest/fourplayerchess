@@ -1,0 +1,65 @@
+computed TD(λ=0.65) targets from bootstrap data/boot.bin
+epoch   0  mse 0.14039
+epoch   1  mse 0.00794
+epoch   2  mse 0.00542
+epoch   3  mse 0.00390
+epoch   4  mse 0.00301
+epoch   5  mse 0.00252
+epoch   6  mse 0.00223
+epoch   7  mse 0.00204
+epoch   8  mse 0.00189
+epoch   9  mse 0.00178
+epoch  10  mse 0.00169
+epoch  11  mse 0.00162
+epoch  12  mse 0.00155
+epoch  13  mse 0.00149
+epoch  14  mse 0.00144
+epoch  15  mse 0.00140
+epoch  16  mse 0.00136
+epoch  17  mse 0.00132
+epoch  18  mse 0.00129
+epoch  19  mse 0.00126
+epoch  20  mse 0.00123
+epoch  21  mse 0.00121
+epoch  22  mse 0.00119
+epoch  23  mse 0.00117
+epoch  24  mse 0.00115
+epoch  25  mse 0.00113
+epoch  26  mse 0.00111
+epoch  27  mse 0.00110
+epoch  28  mse 0.00108
+epoch  29  mse 0.00107
+wrote data/model.bin (54763 rows trained, λ=0.65)
+=== ARENA E4 (depth 4) ===
+loaded net from data/model_e4.bin
+paranoid depth = 4
+progress: 10/200 games
+progress: 20/200 games
+progress: 30/200 games
+progress: 40/200 games
+progress: 50/200 games
+progress: 60/200 games
+progress: 70/200 games
+progress: 80/200 games
+progress: 90/200 games
+progress: 100/200 games
+progress: 110/200 games
+progress: 120/200 games
+progress: 130/200 games
+progress: 140/200 games
+progress: 150/200 games
+progress: 160/200 games
+progress: 170/200 games
+progress: 180/200 games
+progress: 190/200 games
+progress: 200/200 games
+200 games, max 250 plies each
+
+agent          seats  avg_rank  avg_score     elo
+pnet4            112     1.491      76.81    1396
+paranoid4        114     1.868      63.04    1230
+heuristic        116     2.103      49.93    1133
+search2          121     2.438      41.06    1027
+netsearch2        92     2.837      32.09     866
+net              120     3.017      30.48     831
+random           125     3.616       8.95     517
