@@ -1,0 +1,22 @@
+distillation self-play: paranoid d4 teachers, net from data/boot.bin
+progress: 12/240 games
+progress: 24/240 games
+progress: 36/240 games
+progress: 48/240 games
+progress: 60/240 games
+progress: 72/240 games
+progress: 84/240 games
+progress: 96/240 games
+progress: 108/240 games
+progress: 120/240 games
+progress: 132/240 games
+progress: 144/240 games
+progress: 156/240 games
+progress: 168/240 games
+progress: 180/240 games
+progress: 192/240 games
+progress: 204/240 games
+progress: 216/240 games
+progress: 228/240 games
+progress: 240/240 games
+wrote 54763 positions from 240 games (FEAT_DIM=52) -> data/{X,Y,lens}.bin

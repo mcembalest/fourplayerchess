@@ -43,17 +43,20 @@ export function fpc_attack_map(pos_json, color) {
 }
 
 /**
+ * `seed` is JS-supplied entropy (e.g. Math.random()) so move selection — and the
+ * temperature sampling — varies per call; pass the same seed to reproduce a move.
  * @param {string} pos_json
  * @param {number} level
+ * @param {number} seed
  * @returns {string}
  */
-export function fpc_best_move(pos_json, level) {
+export function fpc_best_move(pos_json, level, seed) {
     let deferred2_0;
     let deferred2_1;
     try {
         const ptr0 = passStringToWasm0(pos_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len0 = WASM_VECTOR_LEN;
-        const ret = wasm.fpc_best_move(ptr0, len0, level);
+        const ret = wasm.fpc_best_move(ptr0, len0, level, seed);
         deferred2_0 = ret[0];
         deferred2_1 = ret[1];
         return getStringFromWasm0(ret[0], ret[1]);

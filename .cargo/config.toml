@@ -1,0 +1,4 @@
+# Host-only codegen tuning. Scoped to the macOS host triple so the wasm32 build
+# (fpc-wasm via build-wasm.sh) is unaffected.
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "target-cpu=native"]

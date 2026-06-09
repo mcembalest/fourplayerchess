@@ -53,15 +53,29 @@ fn main() {
     let num_games: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(400);
     let max_steps: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(250);
     let model_path: Option<&String> = args.get(3);
+    let depth: u32 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(3);
 
-    let mut pool = vec![AgentKind::Random, AgentKind::Heuristic, AgentKind::Search(2)];
+    let mut pool = vec![
+        AgentKind::Random,
+        AgentKind::Heuristic,
+        AgentKind::Search(2),
+        AgentKind::Paranoid(depth),
+    ];
     if let Some(path) = model_path {
         let net = std::sync::Arc::new(Net::load(path).expect("load model"));
         pool.push(AgentKind::Net { net: net.clone(), label: "net".into() });
-        pool.push(AgentKind::NetSearch { net, depth: 2, label: "netsearch2".into() });
+        pool.push(AgentKind::NetSearch { net: net.clone(), depth: 2, label: "netsearch2".into() });
+        pool.push(AgentKind::ParanoidNet {
+            net,
+            depth,
+            label: format!("pnet{depth}"),
+        });
         eprintln!("loaded net from {path}");
     }
+    eprintln!("paranoid depth = {depth}");
 
+    let done = std::sync::atomic::AtomicUsize::new(0);
+    let step = (num_games / 20).max(1); // ~20 progress ticks
     let results: Vec<GResult> = (0..num_games)
         .into_par_iter()
         .map(|g| {
@@ -72,7 +86,12 @@ fn main() {
                 rng.below(pool.len()),
                 rng.below(pool.len()),
             ];
-            play(&pool, seats, rng.next_u64(), max_steps)
+            let r = play(&pool, seats, rng.next_u64(), max_steps);
+            let c = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            if c % step == 0 || c == num_games {
+                eprintln!("progress: {c}/{num_games} games");
+            }
+            r
         })
         .collect();
 

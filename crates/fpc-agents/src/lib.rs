@@ -42,6 +42,10 @@ pub enum AgentKind {
     Search(u32),
     Net { net: Arc<Net>, label: String },
     NetSearch { net: Arc<Net>, depth: u32, label: String },
+    /// Paranoid alpha-beta (me vs. the field), material leaf eval.
+    Paranoid(u32),
+    /// Paranoid alpha-beta with the value net as leaf eval.
+    ParanoidNet { net: Arc<Net>, depth: u32, label: String },
 }
 
 impl AgentKind {
@@ -52,23 +56,83 @@ impl AgentKind {
             AgentKind::Search(d) => format!("search{d}"),
             AgentKind::Net { label, .. } => label.clone(),
             AgentKind::NetSearch { label, .. } => label.clone(),
+            AgentKind::Paranoid(d) => format!("paranoid{d}"),
+            AgentKind::ParanoidNet { label, .. } => label.clone(),
         }
     }
+    /// Deterministic agent (argmax move selection).
     pub fn build(&self, seed: u64) -> Box<dyn Agent> {
+        self.build_temp(seed, 0.0)
+    }
+
+    /// Agent with selection temperature `temp` (>0 = sample among near-best moves
+    /// via range-normalized softmax — opening variety while staying sharp where
+    /// one move dominates). `temp=0` reproduces `build`. Heuristic/Random ignore
+    /// temp (Heuristic already has its own scoring noise; Random is uniform).
+    pub fn build_temp(&self, seed: u64, temp: f64) -> Box<dyn Agent> {
         match self {
             AgentKind::Random => Box::new(RandomAgent { rng: Rng::new(seed) }),
             AgentKind::Heuristic => Box::new(HeuristicAgent { rng: Rng::new(seed) }),
-            AgentKind::Search(d) => Box::new(SearchAgent { rng: Rng::new(seed), depth: (*d).max(1) }),
+            AgentKind::Search(d) => {
+                Box::new(SearchAgent { rng: Rng::new(seed), depth: (*d).max(1), temp })
+            }
             AgentKind::Net { net, .. } => {
-                Box::new(NetAgent { net: net.clone(), rng: Rng::new(seed) })
+                Box::new(NetAgent { net: net.clone(), rng: Rng::new(seed), temp })
             }
             AgentKind::NetSearch { net, depth, .. } => Box::new(NetSearchAgent {
                 net: net.clone(),
                 depth: (*depth).max(1),
                 rng: Rng::new(seed),
+                temp,
+            }),
+            AgentKind::Paranoid(d) => Box::new(ParanoidAgent {
+                net: None,
+                depth: (*d).max(1),
+                rng: Rng::new(seed),
+                temp,
+            }),
+            AgentKind::ParanoidNet { net, depth, .. } => Box::new(ParanoidAgent {
+                net: Some(net.clone()),
+                depth: (*depth).max(1),
+                rng: Rng::new(seed),
+                temp,
             }),
         }
     }
+}
+
+/// Pick an index into `vals` by range-normalized softmax sampling at temperature
+/// `temp`. `temp<=0` (or a single candidate) returns the argmax. Normalizing by
+/// the value range makes it scale-invariant across evaluators (score-shares vs
+/// raw material): when all values are equal it's uniform (max variety), when one
+/// dominates it concentrates there (sharp play).
+pub fn sample_softmax(vals: &[f64], temp: f64, rng: &mut Rng) -> usize {
+    let mut bi = 0;
+    let mut bv = f64::MIN;
+    for (i, &v) in vals.iter().enumerate() {
+        if v > bv {
+            bv = v;
+            bi = i;
+        }
+    }
+    if temp <= 0.0 || vals.len() <= 1 {
+        return bi;
+    }
+    let min = vals.iter().cloned().fold(f64::MAX, f64::min);
+    let range = (bv - min).max(1e-9);
+    let probs: Vec<f64> = vals
+        .iter()
+        .map(|&v| ((v - bv) / (temp * range)).exp())
+        .collect();
+    let sum: f64 = probs.iter().sum();
+    let mut r = rng.next_f64() * sum;
+    for (i, &p) in probs.iter().enumerate() {
+        r -= p;
+        if r <= 0.0 {
+            return i;
+        }
+    }
+    bi
 }
 
 pub struct RandomAgent {
@@ -135,6 +199,7 @@ impl Agent for HeuristicAgent {
 pub struct SearchAgent {
     rng: Rng,
     depth: u32,
+    temp: f64,
 }
 
 /// Per-player value estimate: points banked + material on board (active only).
@@ -176,32 +241,29 @@ fn maxn<F: Fn(&State) -> [f64; 4]>(st: &State, depth: u32, ev: &F) -> [f64; 4] {
     best.unwrap_or_else(|| ev(st))
 }
 
-/// Pick the move maximizing the mover's maxⁿ value under evaluator `ev`.
+/// Pick a move by the mover's maxⁿ value under evaluator `ev`, softmax-sampled at
+/// temperature `temp` (temp=0 => argmax).
 fn maxn_select<F: Fn(&State) -> [f64; 4]>(
     st: &State,
     depth: u32,
     rng: &mut Rng,
     ev: &F,
+    temp: f64,
 ) -> Move {
     let me = st.current.unwrap().idx();
-    let mut best = st.current_legal[0];
-    let mut best_val = -1e9;
-    for &mv in &st.current_legal {
+    let moves = &st.current_legal;
+    let mut scores = Vec::with_capacity(moves.len());
+    for &mv in moves {
         let mut ns = st.for_search();
         ns.make_move(mv);
-        let v = maxn(&ns, depth.saturating_sub(1), ev);
-        let score = v[me] + rng.next_f64() * 1e-6; // random tie-break
-        if score > best_val {
-            best_val = score;
-            best = mv;
-        }
+        scores.push(maxn(&ns, depth.saturating_sub(1), ev)[me] as f64);
     }
-    best
+    moves[sample_softmax(&scores, temp, rng)]
 }
 
 impl Agent for SearchAgent {
     fn select(&mut self, st: &State) -> Move {
-        maxn_select(st, self.depth, &mut self.rng, &material_eval)
+        maxn_select(st, self.depth, &mut self.rng, &material_eval, self.temp)
     }
 }
 
@@ -210,6 +272,7 @@ pub struct NetSearchAgent {
     net: Arc<Net>,
     depth: u32,
     rng: Rng,
+    temp: f64,
 }
 
 /// Net value as a normalized score-share 4-vector (true shares at terminal nodes).
@@ -238,22 +301,137 @@ impl Agent for NetSearchAgent {
     fn select(&mut self, st: &State) -> Move {
         let net = self.net.clone();
         let ev = |s: &State| net_eval(&net, s);
-        maxn_select(st, self.depth, &mut self.rng, &ev)
+        maxn_select(st, self.depth, &mut self.rng, &ev, self.temp)
     }
 }
 
-/// Hidden layer width — must match HIDDEN in tools/train.py.
-pub const HIDDEN: usize = 128;
+/// Paranoid alpha-beta search: collapse the 4-player game to 2-player zero-sum
+/// from the root mover's perspective — the mover maximizes its own score-share,
+/// every other (live) player is assumed to minimize it. This admits alpha-beta
+/// pruning, so it searches far deeper than maxⁿ for the same cost (maxⁿ can't
+/// prune). Less myopic than depth-2 maxⁿ (which only sees one opponent reply).
+pub struct ParanoidAgent {
+    net: Option<Arc<Net>>,
+    depth: u32,
+    rng: Rng,
+    temp: f64,
+}
 
-/// Tiny MLP: FEAT_DIM -> HIDDEN -> HIDDEN -> 4, ReLU, no framework needed.
-/// Weights are a flat f32 file: W1,b1,W2,b2,W3,b3 (each W is out*in, row-major).
+/// Order moves captures-first (by captured value) to sharpen alpha-beta pruning.
+fn ordered_moves(st: &State) -> Vec<Move> {
+    let mut mv = st.current_legal.clone();
+    mv.sort_by_key(|m| {
+        let cap = st.board[m.tr as usize][m.tc as usize];
+        let v = cap.map_or(0, |p| value(p.kind));
+        std::cmp::Reverse(v + if m.promo { 9 } else { 0 })
+    });
+    mv
+}
+
+/// Scalar paranoid alpha-beta returning the root mover `me`'s value.
+fn paranoid<F: Fn(&State) -> [f64; 4]>(
+    st: &State,
+    depth: u32,
+    mut alpha: f64,
+    mut beta: f64,
+    me: usize,
+    ev: &F,
+) -> f64 {
+    if st.over || depth == 0 {
+        return ev(st)[me];
+    }
+    let maximizing = st.current.unwrap().idx() == me;
+    if maximizing {
+        let mut v = -1e9f64;
+        for mv in ordered_moves(st) {
+            let mut ns = st.for_search();
+            ns.make_move(mv);
+            v = v.max(paranoid(&ns, depth - 1, alpha, beta, me, ev));
+            alpha = alpha.max(v);
+            if alpha >= beta {
+                break;
+            }
+        }
+        v
+    } else {
+        let mut v = 1e9f64;
+        for mv in ordered_moves(st) {
+            let mut ns = st.for_search();
+            ns.make_move(mv);
+            v = v.min(paranoid(&ns, depth - 1, alpha, beta, me, ev));
+            beta = beta.min(v);
+            if alpha >= beta {
+                break;
+            }
+        }
+        v
+    }
+}
+
+impl Agent for ParanoidAgent {
+    fn select(&mut self, st: &State) -> Move {
+        let me = st.current.unwrap().idx();
+        let net = self.net.clone();
+        let ev = |s: &State| match &net {
+            Some(n) => net_eval(n, s),
+            None => material_eval(s),
+        };
+        let moves = ordered_moves(st);
+        let d = self.depth.saturating_sub(1);
+        // Root alpha-beta with a running alpha (keeps it fast). Best/near-best
+        // moves get accurate values; clearly-worse moves may be underestimated by
+        // the cutoff — harmless for both argmax (temp=0) and softmax sampling
+        // (they'd get low probability anyway).
+        let mut scores = Vec::with_capacity(moves.len());
+        let mut alpha = -1e9;
+        for &mv in &moves {
+            let mut ns = st.for_search();
+            ns.make_move(mv);
+            let v = paranoid(&ns, d, alpha, 1e9, me, &ev);
+            alpha = alpha.max(v);
+            scores.push(v);
+        }
+        moves[sample_softmax(&scores, self.temp, &mut self.rng)]
+    }
+}
+
+/// Hidden layer width — must match HIDDEN in the trainer.
+pub const HIDDEN: usize = 128;
+/// LayerNorm epsilon (must match the trainer).
+pub const LN_EPS: f32 = 1e-5;
+
+/// Tiny MLP with LayerNorm before each ReLU (PQN-style: LN stabilizes
+/// bootstrapped TD training): FEAT_DIM -> [Linear,LN,ReLU] -> [Linear,LN,ReLU]
+/// -> Linear -> 4. Weights are a flat f32 file in `from_bytes` order.
 pub struct Net {
     w1: Vec<f32>,
     b1: Vec<f32>,
+    g1: Vec<f32>, // LayerNorm gain, layer 1
+    n1: Vec<f32>, // LayerNorm bias, layer 1
     w2: Vec<f32>,
     b2: Vec<f32>,
+    g2: Vec<f32>,
+    n2: Vec<f32>,
     w3: Vec<f32>,
     b3: Vec<f32>,
+}
+
+/// Apply LayerNorm with gain `g` and bias `n` to `z` in place, returning nothing.
+#[inline]
+fn layernorm(z: &mut [f32], g: &[f32], n: &[f32]) {
+    let h = z.len();
+    let mean: f32 = z.iter().sum::<f32>() / h as f32;
+    let var: f32 = z.iter().map(|&v| (v - mean) * (v - mean)).sum::<f32>() / h as f32;
+    let inv = 1.0 / (var + LN_EPS).sqrt();
+    for i in 0..h {
+        z[i] = g[i] * ((z[i] - mean) * inv) + n[i];
+    }
+}
+
+/// Flat weight-blob length in floats, for the current architecture.
+pub fn net_blob_floats() -> usize {
+    let (f, h) = (FEAT_DIM, HIDDEN);
+    h * f + h + h + h + h * h + h + h + h + 4 * h + 4
 }
 
 impl Net {
@@ -262,7 +440,8 @@ impl Net {
         Ok(Net::from_bytes(&bytes))
     }
 
-    /// Parse a flat f32 weight blob (W1,b1,W2,b2,W3,b3, each W out*in row-major).
+    /// Parse a flat f32 weight blob in order:
+    /// w1,b1,g1,n1, w2,b2,g2,n2, w3,b3 (each W out*in row-major).
     pub fn from_bytes(bytes: &[u8]) -> Net {
         let floats: Vec<f32> = bytes
             .chunks_exact(4)
@@ -270,7 +449,7 @@ impl Net {
             .collect();
         let f = FEAT_DIM;
         let h = HIDDEN;
-        let expected = h * f + h + h * h + h + 4 * h + 4;
+        let expected = net_blob_floats();
         assert_eq!(
             floats.len(),
             expected,
@@ -285,11 +464,15 @@ impl Net {
         };
         let w1 = take(h * f);
         let b1 = take(h);
+        let g1 = take(h);
+        let n1 = take(h);
         let w2 = take(h * h);
         let b2 = take(h);
+        let g2 = take(h);
+        let n2 = take(h);
         let w3 = take(4 * h);
         let b3 = take(4);
-        Net { w1, b1, w2, b2, w3, b3 }
+        Net { w1, b1, g1, n1, w2, b2, g2, n2, w3, b3 }
     }
 
     /// Predicts the 4-vector of final score-shares for a position.
@@ -303,7 +486,11 @@ impl Net {
             for j in 0..f {
                 s += self.w1[row + j] * x[j];
             }
-            y1[i] = s.max(0.0);
+            y1[i] = s;
+        }
+        layernorm(&mut y1, &self.g1, &self.n1);
+        for v in y1.iter_mut() {
+            *v = v.max(0.0);
         }
         let mut y2 = vec![0.0f32; h];
         for i in 0..h {
@@ -312,7 +499,11 @@ impl Net {
             for j in 0..h {
                 s += self.w2[row + j] * y1[j];
             }
-            y2[i] = s.max(0.0);
+            y2[i] = s;
+        }
+        layernorm(&mut y2, &self.g2, &self.n2);
+        for v in y2.iter_mut() {
+            *v = v.max(0.0);
         }
         let mut out = [0.0f32; 4];
         for i in 0..4 {
@@ -332,13 +523,14 @@ impl Net {
 pub struct NetAgent {
     net: Arc<Net>,
     rng: Rng,
+    temp: f64,
 }
 impl Agent for NetAgent {
     fn select(&mut self, st: &State) -> Move {
         let me = st.current.unwrap().idx();
-        let mut best = st.current_legal[0];
-        let mut best_val = -1e9;
-        for &mv in &st.current_legal {
+        let moves = &st.current_legal;
+        let mut scores = Vec::with_capacity(moves.len());
+        for &mv in moves {
             let mut ns = st.for_search();
             ns.make_move(mv);
             let v = if ns.over {
@@ -346,12 +538,8 @@ impl Agent for NetAgent {
             } else {
                 self.net.forward(&features(&ns))
             };
-            let score = v[me] as f64 + self.rng.next_f64() * 1e-6;
-            if score > best_val {
-                best_val = score;
-                best = mv;
-            }
+            scores.push(v[me] as f64);
         }
-        best
+        moves[sample_softmax(&scores, self.temp, &mut self.rng)]
     }
 }

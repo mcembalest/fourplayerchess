@@ -11,7 +11,7 @@ import init, {
 const Engine = {
   ready: false,
   failed: false,
-  bestMove(pos, level){ const r = fpc_best_move(JSON.stringify(pos), level>>>0); return r ? JSON.parse(r) : null; },
+  bestMove(pos, level){ const r = fpc_best_move(JSON.stringify(pos), level>>>0, Math.random()); return r ? JSON.parse(r) : null; },
   eval(pos){ return JSON.parse(fpc_eval(JSON.stringify(pos))); },
   legalMoves(pos){ return JSON.parse(fpc_legal_moves(JSON.stringify(pos))); },
   analyze(history, level){ return JSON.parse(fpc_analyze(JSON.stringify(history), level>>>0)); },

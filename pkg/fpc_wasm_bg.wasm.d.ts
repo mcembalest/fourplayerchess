@@ -3,7 +3,7 @@
 export const memory: WebAssembly.Memory;
 export const fpc_new_game: () => [number, number];
 export const fpc_legal_moves: (a: number, b: number) => [number, number];
-export const fpc_best_move: (a: number, b: number, c: number) => [number, number];
+export const fpc_best_move: (a: number, b: number, c: number, d: number) => [number, number];
 export const fpc_eval: (a: number, b: number) => [number, number];
 export const fpc_analyze: (a: number, b: number, c: number) => [number, number];
 export const fpc_attack_map: (a: number, b: number, c: number, d: number) => [number, number];

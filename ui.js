@@ -290,7 +290,7 @@ function onClick(r,c){
 }
 
 /* ---------- engine status ---------- */
-const LEVEL_NAME = { 0:"Hard", 1:"Medium", 2:"Easy", 3:"Beginner" };  // level number = engine rung (0=heuristic strongest, 3=random)
+const LEVEL_NAME = { 0:"Hard", 1:"Medium", 2:"Easy", 3:"Beginner", 4:"Expert" };  // 4=ParanoidNet d4 (strongest), 0=heuristic, 3=random
 function updateEngineStatus(){
   const el=document.getElementById("engineStatus");
   if(!el) return;
