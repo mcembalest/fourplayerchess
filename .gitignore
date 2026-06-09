@@ -6,5 +6,8 @@
 /data/X.bin
 /data/Y.bin
 
+# Inter-agent comms scratch
+/comms/
+
 # macOS
 .DS_Store
