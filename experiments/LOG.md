@@ -27,6 +27,29 @@ scan) **285k = 3.3×**. diff.rs green throughout; throughput stays exact 499967/
 Data-gen CPU work ~2.36× less (pn leaves still do unbatched net forwards). Next
 lever if needed: lazy legality (pins/checkers) — see bench/MOVEGEN-VECTORIZATION.md.
 
+### Net/search perf pass (2026-06-09)
+Leaf split measured (latency.rs probe): features 0.54µs vs **Net::forward 8.7µs**
+— forward was 94% of leaf cost, single-accumulator dots = latency-bound FMA chain.
+Fixes: 8-lane `dot()` + stack buffers in forward (8.7→2.2µs, 4×); mem::take move
+lists + for_search in maxⁿ (no per-node clones); trainer on same dot + zero-alloc
+backprop + rayon TD-target pass (~4s→0.4s/epoch, ~10×); arena forces ≥1 candidate
+seat/game (anchor-vs-anchor games carried no new info; NOTE anchor Elo not
+comparable to pre-change runs). **pnet4: 603→239ms/move start, 379→154ms midgame
+(~2.5×); arena 100g/d4 = 2:35 (was ~6.5min); data-gen 24g/d4+eps = 41.5s.**
+All behavior-preserving (fp reassociation only); diff.rs green; wasm builds.
+
+Round 2 (same day): **killer moves + root iterative deepening** in paranoid
+(TT skipped on purpose: round-robin turn order = no transpositions until d8).
+Killers alone: identical trajectories, −23% CPU; +ID: −15% more (slight
+tie-break drift, 5452→5468 pos/24g). **Worktree-verified totals vs HEAD:
+data-gen 24g/d4 568→180s CPU (3.2×), 86→33s wall; arena 60g/d4 = 45s (~5× the
+13min/200g era).** Plus **replay buffer shipped**: `selfplay ... <tag>` →
+data/buffer/<tag>/; `train ... [decay]` loads ALL gens, samples rows at
+decay^age per epoch (decay=1 uniform keep-all; legacy flat files if no buffer).
+Validated: 2-gen load, decay=0.5 sampled 3644/~3646 expected rows.
+Next levers: batched leaf eval (GEMM), lazy legality (needs sign-off), migrate
+gen data into data/buffer/ tags and rerun the gen-3 iterate with accumulation.
+
 ### Search track (paranoid alpha-beta = me vs. the field, scalar my-share)
 | # | agent | elo | notes |
 |---|-------|----:|-------|

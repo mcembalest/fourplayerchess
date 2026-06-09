@@ -3,7 +3,13 @@
 //! TD; the target is a TD(λ) return (λ=1 reproduces the pure Monte-Carlo label).
 //! Mini-batch SGD + momentum, MSE, small ℓ₂ on the output layer.
 //!
-//!   cargo run -p fpc-train --release --bin train -- [epochs] [max_rows] [lambda] [bootstrap.bin?]
+//!   cargo run -p fpc-train --release --bin train -- [epochs] [max_rows] [lambda] [bootstrap.bin?] [decay]
+//!
+//! Data: if data/buffer/<tag>/ generations exist (written by selfplay with a
+//! tag), ALL of them are loaded, oldest..newest by tag order, and each epoch
+//! samples rows with probability decay^age (age = generations back from the
+//! newest; decay=1 keeps everything uniformly). Otherwise the legacy flat
+//! data/{X,Y,lens}.bin files are used.
 //!
 //! TD(λ) targets are computed once up front from the frozen `bootstrap` net
 //! (one round of generalized policy iteration). With λ<1 a bootstrap net is
@@ -13,7 +19,7 @@
 
 use std::io::Write;
 
-use fpc_agents::{Net, Rng, HIDDEN, LN_EPS};
+use fpc_agents::{dot, Net, Rng, HIDDEN, LN_EPS};
 use fpc_core::FEAT_DIM;
 use rayon::prelude::*;
 
@@ -78,17 +84,13 @@ impl Grads {
 }
 
 /// Forward + backward for one sample, accumulating gradients into `g`.
+/// Stack buffers throughout — no per-sample heap allocation.
 fn backprop(p: &Params, h: usize, f: usize, xi: &[f32], ti: &[f32], g: &mut Grads) {
     let (a1, zhat1, inv1) = lin_ln_relu(xi, p.w1, p.b1, p.g1, p.n1, h, f);
     let (a2, zhat2, inv2) = lin_ln_relu(&a1, p.w2, p.b2, p.g2, p.n2, h, h);
     let mut out = [0.0f32; 4];
     for o in 0..4 {
-        let mut s = p.b3[o];
-        let r = o * h;
-        for j in 0..h {
-            s += p.w3[r + j] * a2[j];
-        }
-        out[o] = s;
+        out[o] = p.b3[o] + dot(&p.w3[o * h..(o + 1) * h], &a2);
     }
     let mut dout = [0.0f32; 4];
     for o in 0..4 {
@@ -97,7 +99,7 @@ fn backprop(p: &Params, h: usize, f: usize, xi: &[f32], ti: &[f32], g: &mut Grad
         dout[o] = 0.5 * e;
     }
     // layer 3 (linear)
-    let mut da2 = vec![0.0f32; h];
+    let mut da2 = [0.0f32; HIDDEN];
     for o in 0..4 {
         let r = o * h;
         g.b3[o] += dout[o];
@@ -107,7 +109,7 @@ fn backprop(p: &Params, h: usize, f: usize, xi: &[f32], ti: &[f32], g: &mut Grad
         }
     }
     let dz2 = ln_relu_backward(&da2, &a2, &zhat2, inv2, p.g2, &mut g.g2, &mut g.n2);
-    let mut da1 = vec![0.0f32; h];
+    let mut da1 = [0.0f32; HIDDEN];
     for o in 0..h {
         let r = o * h;
         g.b2[o] += dz2[o];
@@ -126,7 +128,7 @@ fn backprop(p: &Params, h: usize, f: usize, xi: &[f32], ti: &[f32], g: &mut Grad
     }
 }
 
-fn read_f32(path: &str) -> Vec<f32> {
+fn read_f32(path: impl AsRef<std::path::Path>) -> Vec<f32> {
     let bytes = std::fs::read(path).expect("read data file");
     bytes
         .chunks_exact(4)
@@ -134,12 +136,49 @@ fn read_f32(path: &str) -> Vec<f32> {
         .collect()
 }
 
-fn read_u32(path: &str) -> Vec<u32> {
+fn read_u32(path: impl AsRef<std::path::Path>) -> Vec<u32> {
     let bytes = std::fs::read(path).expect("read data file");
     bytes
         .chunks_exact(4)
         .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect()
+}
+
+/// Load training data: every generation under data/buffer/ (oldest..newest by
+/// tag order) if any exist, else the legacy flat files. Returns (x, y, lens,
+/// per-row age) where age = generations back from the newest (newest = 0).
+fn load_data(f: usize) -> (Vec<f32>, Vec<f32>, Vec<u32>, Vec<u32>) {
+    let mut gens: Vec<std::path::PathBuf> = std::fs::read_dir("data/buffer")
+        .map(|rd| {
+            rd.filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| p.is_dir())
+                .collect()
+        })
+        .unwrap_or_default();
+    gens.sort();
+    if gens.is_empty() {
+        let x = read_f32("data/X.bin");
+        let y = read_f32("data/Y.bin");
+        let lens = read_u32("data/lens.bin");
+        let age = vec![0u32; y.len() / 4];
+        return (x, y, lens, age);
+    }
+    let (mut x, mut y, mut lens, mut age) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for (gi, dir) in gens.iter().enumerate() {
+        let gx = read_f32(dir.join("X.bin"));
+        let gy = read_f32(dir.join("Y.bin"));
+        let gl = read_u32(dir.join("lens.bin"));
+        let rows = gy.len() / 4;
+        assert_eq!(gx.len(), rows * f, "bad X size in {}", dir.display());
+        assert_eq!(gl.iter().map(|&l| l as usize).sum::<usize>(), rows, "bad lens in {}", dir.display());
+        let a = (gens.len() - 1 - gi) as u32;
+        eprintln!("buffer gen {} : {} rows (age {a})", dir.display(), rows);
+        x.extend_from_slice(&gx);
+        y.extend_from_slice(&gy);
+        lens.extend_from_slice(&gl);
+        age.extend(std::iter::repeat(a).take(rows));
+    }
+    (x, y, lens, age)
 }
 
 fn main() -> std::io::Result<()> {
@@ -148,17 +187,18 @@ fn main() -> std::io::Result<()> {
     let max_rows: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(1_000_000);
     let mut lambda: f32 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(1.0);
     let bootstrap: Option<&String> = args.get(4);
+    let decay: f64 = args.get(5).and_then(|s| s.parse().ok()).unwrap_or(1.0);
 
     let f = FEAT_DIM;
     let h = HIDDEN;
-    let x = read_f32("data/X.bin");
-    let y = read_f32("data/Y.bin");
+    let (x, y, lens, age) = load_data(f);
     let n_all = y.len() / 4;
     assert_eq!(x.len(), n_all * f);
+    assert_eq!(lens.iter().map(|&l| l as usize).sum::<usize>(), n_all);
+    // Per-row inclusion probability: decay^age (newest generation always 1).
+    let weight: Vec<f64> = age.iter().map(|&a| decay.powi(a as i32)).collect();
 
     // ---- TD(λ) targets, computed once from the frozen bootstrap net ----
-    let lens = read_u32("data/lens.bin");
-    assert_eq!(lens.iter().map(|&l| l as usize).sum::<usize>(), n_all);
     let mut target = y.clone(); // λ=1 default: target = terminal reward (MC)
     if lambda < 1.0 {
         match bootstrap {
@@ -168,12 +208,11 @@ fn main() -> std::io::Result<()> {
             }
             Some(path) => {
                 let net = Net::load(path).expect("load bootstrap net");
-                // V(s) for every recorded state.
+                // V(s) for every recorded state (rows are independent -> rayon).
                 let mut v = vec![0.0f32; n_all * 4];
-                for r in 0..n_all {
-                    let pred = net.forward(&x[r * f..r * f + f]);
-                    v[r * 4..r * 4 + 4].copy_from_slice(&pred);
-                }
+                v.par_chunks_mut(4).enumerate().for_each(|(r, out)| {
+                    out.copy_from_slice(&net.forward(&x[r * f..r * f + f]));
+                });
                 // Per trajectory, fold λ-returns backward (γ=1, terminal reward = y).
                 let mut start = 0usize;
                 for &len in &lens {
@@ -201,14 +240,6 @@ fn main() -> std::io::Result<()> {
     }
 
     let mut rng = Rng::new(0x5EED);
-
-    // shuffle indices and cap dataset
-    let mut idx: Vec<usize> = (0..n_all).collect();
-    for i in (1..idx.len()).rev() {
-        idx.swap(i, rng.below(i + 1));
-    }
-    idx.truncate(max_rows.min(n_all));
-    let n = idx.len();
 
     // params: Linear weights Xavier-ish, LayerNorm gain=1 bias=0
     let mut w1 = init(&mut rng, h * f, f, h);
@@ -239,10 +270,17 @@ fn main() -> std::io::Result<()> {
     let mom = 0.9f32;
     let wd = 1e-4f32; // ℓ₂ on output layer (PQN regularizer)
 
+    let mut n = 0usize;
     for ep in 0..epochs {
-        for i in (1..n).rev() {
+        // Per-epoch sample: keep each row with prob decay^age, shuffle, cap.
+        let mut idx: Vec<usize> = (0..n_all)
+            .filter(|&r| decay >= 1.0 || rng.next_f64() < weight[r])
+            .collect();
+        for i in (1..idx.len()).rev() {
             idx.swap(i, rng.below(i + 1));
         }
+        idx.truncate(max_rows.min(idx.len()));
+        n = idx.len();
         let mut epoch_loss = 0.0f64;
         let mut seen = 0usize;
 
@@ -315,21 +353,16 @@ fn lin_ln_relu(
     n: &[f32],
     h: usize,
     fin: usize,
-) -> (Vec<f32>, Vec<f32>, f32) {
-    let mut z = vec![0.0f32; h];
+) -> ([f32; HIDDEN], [f32; HIDDEN], f32) {
+    let mut z = [0.0f32; HIDDEN];
     for o in 0..h {
-        let mut s = b[o];
-        let r = o * fin;
-        for j in 0..fin {
-            s += w[r + j] * x[j];
-        }
-        z[o] = s;
+        z[o] = b[o] + dot(&w[o * fin..(o + 1) * fin], x);
     }
     let mean: f32 = z.iter().sum::<f32>() / h as f32;
     let var: f32 = z.iter().map(|&v| (v - mean) * (v - mean)).sum::<f32>() / h as f32;
     let inv = 1.0 / (var + LN_EPS).sqrt();
-    let mut zhat = vec![0.0f32; h];
-    let mut a = vec![0.0f32; h];
+    let mut zhat = [0.0f32; HIDDEN];
+    let mut a = [0.0f32; HIDDEN];
     for o in 0..h {
         zhat[o] = (z[o] - mean) * inv;
         let yv = g[o] * zhat[o] + n[o];
@@ -349,15 +382,15 @@ fn ln_relu_backward(
     g: &[f32],
     gg: &mut [f32],
     gn: &mut [f32],
-) -> Vec<f32> {
+) -> [f32; HIDDEN] {
     let h = da.len();
     // through ReLU: dy = da * 1[a>0]
-    let mut dy = vec![0.0f32; h];
+    let mut dy = [0.0f32; HIDDEN];
     for o in 0..h {
         dy[o] = if a[o] > 0.0 { da[o] } else { 0.0 };
     }
     // LN param grads + grad wrt normalized zhat
-    let mut dzhat = vec![0.0f32; h];
+    let mut dzhat = [0.0f32; HIDDEN];
     for o in 0..h {
         gg[o] += dy[o] * zhat[o];
         gn[o] += dy[o];
@@ -365,8 +398,8 @@ fn ln_relu_backward(
     }
     let mean_dzhat: f32 = dzhat.iter().sum::<f32>() / h as f32;
     let mean_dzhat_zhat: f32 =
-        dzhat.iter().zip(zhat).map(|(&d, &z)| d * z).sum::<f32>() / h as f32;
-    let mut dz = vec![0.0f32; h];
+        dzhat.iter().zip(zhat.iter()).map(|(&d, &z)| d * z).sum::<f32>() / h as f32;
+    let mut dz = [0.0f32; HIDDEN];
     for o in 0..h {
         dz[o] = inv * (dzhat[o] - mean_dzhat - zhat[o] * mean_dzhat_zhat);
     }

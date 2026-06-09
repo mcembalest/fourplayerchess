@@ -74,18 +74,26 @@ fn main() {
     }
     eprintln!("paranoid depth = {depth}");
 
+    // pool[0..4] are the fixed anchors; model agents (if any) are candidates.
+    let n_anchor = 4usize.min(pool.len());
     let done = std::sync::atomic::AtomicUsize::new(0);
     let step = (num_games / 20).max(1); // ~20 progress ticks
     let results: Vec<GResult> = (0..num_games)
         .into_par_iter()
         .map(|g| {
             let mut rng = Rng::new(0xC0FFEE ^ (g as u64).wrapping_mul(0x100000001B3));
-            let seats = [
+            let mut seats = [
                 rng.below(pool.len()),
                 rng.below(pool.len()),
                 rng.below(pool.len()),
                 rng.below(pool.len()),
             ];
+            // Guarantee at least one candidate seat per game: anchor-vs-anchor
+            // games re-measure Elo we already know, so every game should carry
+            // information about the agents under evaluation.
+            if pool.len() > n_anchor {
+                seats[rng.below(4)] = n_anchor + rng.below(pool.len() - n_anchor);
+            }
             let r = play(&pool, seats, rng.next_u64(), max_steps);
             let c = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
             if c % step == 0 || c == num_games {

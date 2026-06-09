@@ -229,7 +229,7 @@ fn maxn<F: Fn(&State) -> [f64; 4]>(st: &State, depth: u32, ev: &F) -> [f64; 4] {
     let me = st.current.unwrap().idx();
     let mut best: Option<[f64; 4]> = None;
     for &mv in &st.current_legal {
-        let mut ns = st.clone();
+        let mut ns = st.for_search();
         ns.make_move(mv);
         let v = maxn(&ns, depth - 1, ev);
         match best {
@@ -320,47 +320,80 @@ pub struct ParanoidAgent {
 /// Order moves captures-first (by captured value) to sharpen alpha-beta pruning.
 fn ordered_moves(st: &State) -> Vec<Move> {
     let mut mv = st.current_legal.clone();
-    mv.sort_by_key(|m| {
-        let cap = st.board[m.tr as usize][m.tc as usize];
-        let v = cap.map_or(0, |p| value(p.kind));
-        std::cmp::Reverse(v + if m.promo { 9 } else { 0 })
-    });
+    order_moves(st, &mut mv, &[None, None]);
     mv
 }
 
+/// Max search ply the killer tables cover (depth is ≤8 in practice).
+const MAX_PLY: usize = 16;
+/// Two remembered cutoff moves per ply (killer heuristic).
+type Killers = [[Option<Move>; 2]; MAX_PLY];
+
+/// Sort `mv` in place: captures first (by captured value), then this ply's
+/// killer moves (quiet moves that recently caused a cutoff here), then the rest.
+fn order_moves(st: &State, mv: &mut [Move], killers: &[Option<Move>; 2]) {
+    mv.sort_by_key(|m| {
+        let cap = st.board[m.tr as usize][m.tc as usize];
+        let v = cap.map_or(0, |p| value(p.kind));
+        let mut s = 10 * (v + if m.promo { 9 } else { 0 });
+        if s == 0 && (killers[0] == Some(*m) || killers[1] == Some(*m)) {
+            s = 5;
+        }
+        std::cmp::Reverse(s)
+    });
+}
+
+/// Remember a cutoff move in this ply's killer slots (most recent first).
+#[inline]
+fn note_killer(killers: &mut Killers, ply: usize, mv: Move) {
+    let ks = &mut killers[ply.min(MAX_PLY - 1)];
+    if ks[0] != Some(mv) {
+        ks[1] = ks[0];
+        ks[0] = Some(mv);
+    }
+}
+
 /// Scalar paranoid alpha-beta returning the root mover `me`'s value.
+/// Takes the node by `&mut` so the move list can be taken out of the state
+/// instead of cloned per node (callers pass freshly made search states).
 fn paranoid<F: Fn(&State) -> [f64; 4]>(
-    st: &State,
+    st: &mut State,
     depth: u32,
     mut alpha: f64,
     mut beta: f64,
     me: usize,
     ev: &F,
+    ply: usize,
+    killers: &mut Killers,
 ) -> f64 {
     if st.over || depth == 0 {
         return ev(st)[me];
     }
+    let mut moves = std::mem::take(&mut st.current_legal);
+    order_moves(st, &mut moves, &killers[ply.min(MAX_PLY - 1)]);
     let maximizing = st.current.unwrap().idx() == me;
     if maximizing {
         let mut v = -1e9f64;
-        for mv in ordered_moves(st) {
+        for mv in moves {
             let mut ns = st.for_search();
             ns.make_move(mv);
-            v = v.max(paranoid(&ns, depth - 1, alpha, beta, me, ev));
+            v = v.max(paranoid(&mut ns, depth - 1, alpha, beta, me, ev, ply + 1, killers));
             alpha = alpha.max(v);
             if alpha >= beta {
+                note_killer(killers, ply, mv);
                 break;
             }
         }
         v
     } else {
         let mut v = 1e9f64;
-        for mv in ordered_moves(st) {
+        for mv in moves {
             let mut ns = st.for_search();
             ns.make_move(mv);
-            v = v.min(paranoid(&ns, depth - 1, alpha, beta, me, ev));
+            v = v.min(paranoid(&mut ns, depth - 1, alpha, beta, me, ev, ply + 1, killers));
             beta = beta.min(v);
             if alpha >= beta {
+                note_killer(killers, ply, mv);
                 break;
             }
         }
@@ -376,8 +409,26 @@ impl Agent for ParanoidAgent {
             Some(n) => net_eval(n, s),
             None => material_eval(s),
         };
-        let moves = ordered_moves(st);
+        let mut moves = ordered_moves(st);
         let d = self.depth.saturating_sub(1);
+        let mut killers: Killers = [[None; 2]; MAX_PLY];
+        // Iterative deepening at the root: a cheap shallow pass orders the root
+        // moves best-first (and warms the killer tables), so the full-depth loop
+        // establishes a high alpha on the first move — much sharper cutoffs than
+        // captures-first ordering alone.
+        if d >= 2 {
+            let mut alpha = -1e9;
+            let mut shallow: Vec<(f64, Move)> = Vec::with_capacity(moves.len());
+            for &mv in &moves {
+                let mut ns = st.for_search();
+                ns.make_move(mv);
+                let v = paranoid(&mut ns, d - 2, alpha, 1e9, me, &ev, 0, &mut killers);
+                alpha = alpha.max(v);
+                shallow.push((v, mv));
+            }
+            shallow.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+            moves = shallow.into_iter().map(|(_, m)| m).collect();
+        }
         // Root alpha-beta with a running alpha (keeps it fast). Best/near-best
         // moves get accurate values; clearly-worse moves may be underestimated by
         // the cutoff — harmless for both argmax (temp=0) and softmax sampling
@@ -387,7 +438,7 @@ impl Agent for ParanoidAgent {
         for &mv in &moves {
             let mut ns = st.for_search();
             ns.make_move(mv);
-            let v = paranoid(&ns, d, alpha, 1e9, me, &ev);
+            let v = paranoid(&mut ns, d, alpha, 1e9, me, &ev, 0, &mut killers);
             alpha = alpha.max(v);
             scores.push(v);
         }
@@ -414,6 +465,28 @@ pub struct Net {
     n2: Vec<f32>,
     w3: Vec<f32>,
     b3: Vec<f32>,
+}
+
+/// Dot product with 8 independent accumulator lanes. The naive single-
+/// accumulator form is a sequential FMA dependency chain the compiler may not
+/// reassociate (no fast-math), leaving the matvec latency-bound; explicit lanes
+/// let it run at FMA throughput and auto-vectorize (NEON / wasm simd128).
+#[inline]
+pub fn dot(a: &[f32], b: &[f32]) -> f32 {
+    let n = a.len().min(b.len());
+    let mut lanes = [0.0f32; 8];
+    let mut ca = a[..n].chunks_exact(8);
+    let mut cb = b[..n].chunks_exact(8);
+    for (xa, xb) in (&mut ca).zip(&mut cb) {
+        for l in 0..8 {
+            lanes[l] += xa[l] * xb[l];
+        }
+    }
+    let mut s = lanes.iter().sum::<f32>();
+    for (xa, xb) in ca.remainder().iter().zip(cb.remainder()) {
+        s += xa * xb;
+    }
+    s
 }
 
 /// Apply LayerNorm with gain `g` and bias `n` to `z` in place, returning nothing.
@@ -476,30 +549,21 @@ impl Net {
     }
 
     /// Predicts the 4-vector of final score-shares for a position.
+    /// Zero-allocation (stack buffers) — this is the search-leaf hot path.
     pub fn forward(&self, x: &[f32]) -> [f32; 4] {
         let h = HIDDEN;
         let f = FEAT_DIM;
-        let mut y1 = vec![0.0f32; h];
+        let mut y1 = [0.0f32; HIDDEN];
         for i in 0..h {
-            let mut s = self.b1[i];
-            let row = i * f;
-            for j in 0..f {
-                s += self.w1[row + j] * x[j];
-            }
-            y1[i] = s;
+            y1[i] = self.b1[i] + dot(&self.w1[i * f..(i + 1) * f], x);
         }
         layernorm(&mut y1, &self.g1, &self.n1);
         for v in y1.iter_mut() {
             *v = v.max(0.0);
         }
-        let mut y2 = vec![0.0f32; h];
+        let mut y2 = [0.0f32; HIDDEN];
         for i in 0..h {
-            let mut s = self.b2[i];
-            let row = i * h;
-            for j in 0..h {
-                s += self.w2[row + j] * y1[j];
-            }
-            y2[i] = s;
+            y2[i] = self.b2[i] + dot(&self.w2[i * h..(i + 1) * h], &y1);
         }
         layernorm(&mut y2, &self.g2, &self.n2);
         for v in y2.iter_mut() {
@@ -507,12 +571,7 @@ impl Net {
         }
         let mut out = [0.0f32; 4];
         for i in 0..4 {
-            let mut s = self.b3[i];
-            let row = i * h;
-            for j in 0..h {
-                s += self.w3[row + j] * y2[j];
-            }
-            out[i] = s;
+            out[i] = self.b3[i] + dot(&self.w3[i * h..(i + 1) * h], &y2);
         }
         out
     }

@@ -1,10 +1,14 @@
 //! Self-play data generation. Plays games with a configurable field of agents,
 //! records every visited position in trajectory order, and writes flat files:
-//!   data/X.bin    (n * FEAT_DIM)            features, in trajectory order
-//!   data/Y.bin    (n * 4)                   per-row terminal reward (final shares)
-//!   data/lens.bin (num_traj * u32)          length of each trajectory (for TD(λ))
+//!   X.bin    (n * FEAT_DIM)            features, in trajectory order
+//!   Y.bin    (n * 4)                   per-row terminal reward (final shares)
+//!   lens.bin (num_traj * u32)          length of each trajectory (for TD(λ))
 //!
-//!   cargo run -p fpc-train --release -- [num_games] [max_steps] [model.bin?]
+//!   cargo run -p fpc-train --release -- [num_games] [max_steps] [model.bin?] [depth] [eps] [tag?]
+//!
+//! With a `tag` (6th arg) the files go to data/buffer/<tag>/ — an append-only
+//! replay buffer of generations the trainer reads in full (recency-weighted).
+//! Without a tag they go to data/ directly (legacy single-generation mode).
 //!
 //! Without a model: heuristic/random fields (bootstrap data). With a model: the
 //! net plays a share of the games (iterated self-play — the net learns from its
@@ -59,6 +63,10 @@ fn main() -> std::io::Result<()> {
     let model_path: Option<&String> = args.get(3);
     let depth: u32 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(0);
     let eps: f64 = args.get(5).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+    let out_dir = match args.get(6) {
+        Some(tag) => format!("data/buffer/{tag}"),
+        None => "data".to_string(),
+    };
 
     // Build the per-game seat fields. With a model + search depth, the strong
     // paranoid agents (which beat the heuristic) are the teachers — the value
@@ -140,17 +148,17 @@ fn main() -> std::io::Result<()> {
     }
 
     let n = ys.len() / 4;
-    std::fs::create_dir_all("data")?;
-    write_f32("data/X.bin", &xs)?;
-    write_f32("data/Y.bin", &ys)?;
-    let mut fl = std::io::BufWriter::new(std::fs::File::create("data/lens.bin")?);
+    std::fs::create_dir_all(&out_dir)?;
+    write_f32(&format!("{out_dir}/X.bin"), &xs)?;
+    write_f32(&format!("{out_dir}/Y.bin"), &ys)?;
+    let mut fl = std::io::BufWriter::new(std::fs::File::create(format!("{out_dir}/lens.bin"))?);
     for v in &lens {
         fl.write_all(&v.to_le_bytes())?;
     }
     fl.flush()?;
 
     eprintln!(
-        "wrote {} positions from {} games (FEAT_DIM={}) -> data/{{X,Y,lens}}.bin",
+        "wrote {} positions from {} games (FEAT_DIM={}) -> {out_dir}/{{X,Y,lens}}.bin",
         n, num_games, FEAT_DIM
     );
     Ok(())
