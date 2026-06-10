@@ -5,6 +5,7 @@
 # fpc-train). Only champion.bin is tracked — it's include_bytes!'d into fpc-wasm.
 /data/*.bin
 !/data/champion.bin
+/data/buffer*/
 
 # Inter-agent comms scratch
 /comms/

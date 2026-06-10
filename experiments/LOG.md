@@ -81,6 +81,10 @@ Old 52-dim gens archived in data/buffer52/.
 
 | E14 | **tac gen-2 accumulation** (tac-g2 = 400g model_tac_b teachers; train on g1+g2 = 171.6k rows from two distinct teacher gens, TD λ=0.65 bootstrap=tac_b, decay=1) | pnet4 (tac2) 1226 ≈ champ4 (tac1) 1244 ≈ paranoid4 1237 | 200g h2h. Three-way tie (tac2 has best avg_rank 1.857/avg_score 57.8 but lowest Elo of the three — i.e. noise). Accumulation neither gained nor regressed (contrast E8's −71 gen-3 collapse). Also tempers E13: tac-net edge over material reads as parity-to-+60 across runs, not a solid +60. Both tac nets remain ~+100 over the old champion. **Recommend promoting model_tac_b (direct +116 h2h win in E13); gen-3 likely needs a stronger lever (more tactical dims, H=256) than another iterate.** |
 
+**PROMOTED (2026-06-09):** model_tac_b (E13 gen-1 tac net) → data/champion.bin,
+pkg/ rebuilt (327KB), wasm tests 5/5, oracle green. E14 gave no reason to prefer
+gen-2. Backlog moved to TODO.md.
+
 **The pattern across E9/E10/E11:** every value net trained so far — absolute or
 relative, MC or TD — is a WORSE alpha-beta leaf than counting material, at d4 and
 d6, once move ordering is decent. The value *target* (smooth final score-shares)
