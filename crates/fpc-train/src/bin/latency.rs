@@ -8,10 +8,11 @@ use fpc_core::*;
 
 fn main() {
     let path = std::env::args().nth(1).unwrap_or("data/champion.bin".into());
+    let depth: u32 = std::env::args().nth(2).and_then(|s| s.parse().ok()).unwrap_or(4);
     let net = Arc::new(Net::load(&path).expect("load"));
     let kinds = [
-        AgentKind::ParanoidNet { net, depth: 4, label: "pnet4".into() },
-        AgentKind::Paranoid(4),
+        AgentKind::ParanoidNet { net, depth, label: format!("pnet{depth}") },
+        AgentKind::Paranoid(depth),
     ];
 
     // start position + a midgame position (after 24 random plies)

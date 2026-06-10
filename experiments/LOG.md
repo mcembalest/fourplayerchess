@@ -64,6 +64,18 @@ Use direct challenger-vs-champ4 h2h (same pool, same conditions) going forward.
 material at d4 under the improved search, and does the answer flip at d6 (now
 affordable: d4 search is 3.2× cheaper)?
 
+| E10 | **d6 probe** (48g, champion net, depth 6) | paranoid6 1417 / pnet6 1403 — tied | 4.9 CPU-h. Costs: pnet6 3.4s/move start, 19s midgame; paranoid6 0.9–2.4s. |
+
+**E10 conclusion:** the E4 "net leaf pulls ahead with depth" pattern does NOT
+reappear at d6 under killer+ID ordering (at d4 it's also gone, E9). Better move
+ordering closed the gap the net's smooth values used to provide. The value NET
+is now the bottleneck, not search depth → next lever is the net itself:
+**perspective-relative features** (current 52 are absolute — the net learns
+every pattern 4×, once per seat rotation) **+ wider hidden layer** (H=128 was
+sized when forward cost 8.7µs; it's 2.2µs now, trainer 0.4s/epoch). Breaks
+.bin/FEAT_DIM compat — old champion keeps working at old commits / current wasm
+until a new champion ships. d6 teachers parked until a net is worth deepening.
+
 ### Search track (paranoid alpha-beta = me vs. the field, scalar my-share)
 | # | agent | elo | notes |
 |---|-------|----:|-------|
