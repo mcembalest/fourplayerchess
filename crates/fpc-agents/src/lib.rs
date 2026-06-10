@@ -281,7 +281,7 @@ fn net_eval(net: &Net, st: &State) -> [f64; 4] {
         let s = score_shares(&st.scores);
         return [s[0] as f64, s[1] as f64, s[2] as f64, s[3] as f64];
     }
-    let raw = net.forward(&features(st));
+    let raw = net.value(st);
     let mut sum = 0.0f64;
     let mut o = [0.0f64; 4];
     for i in 0..4 {
@@ -452,9 +452,14 @@ pub const HIDDEN: usize = 128;
 pub const LN_EPS: f32 = 1e-5;
 
 /// Tiny MLP with LayerNorm before each ReLU (PQN-style: LN stabilizes
-/// bootstrapped TD training): FEAT_DIM -> [Linear,LN,ReLU] -> [Linear,LN,ReLU]
-/// -> Linear -> 4. Weights are a flat f32 file in `from_bytes` order.
+/// bootstrapped TD training): in_dim -> [Linear,LN,ReLU] -> [Linear,LN,ReLU]
+/// -> Linear -> 4. Weights are a flat f32 file in `from_bytes` order; the
+/// (in_dim, hidden) shape is inferred from the blob length. in_dim doubles as
+/// the format marker: FEAT_DIM = absolute features, FEAT_DIM_REL =
+/// perspective-relative features with rotated outputs (see `value`).
 pub struct Net {
+    f: usize, // input dim (which feature format this net consumes)
+    h: usize, // hidden width
     w1: Vec<f32>,
     b1: Vec<f32>,
     g1: Vec<f32>, // LayerNorm gain, layer 1
@@ -466,6 +471,11 @@ pub struct Net {
     w3: Vec<f32>,
     b3: Vec<f32>,
 }
+
+/// Hidden widths the blob-shape inference will try.
+const HIDDEN_CANDIDATES: [usize; 4] = [128, 256, 384, 512];
+/// Upper bound on hidden width (stack buffers in `forward`).
+pub const MAX_HIDDEN: usize = 512;
 
 /// Dot product with 8 independent accumulator lanes. The naive single-
 /// accumulator form is a sequential FMA dependency chain the compiler may not
@@ -501,10 +511,24 @@ fn layernorm(z: &mut [f32], g: &[f32], n: &[f32]) {
     }
 }
 
-/// Flat weight-blob length in floats, for the current architecture.
-pub fn net_blob_floats() -> usize {
-    let (f, h) = (FEAT_DIM, HIDDEN);
+/// Flat weight-blob length in floats for a given (in_dim, hidden) shape.
+pub fn net_blob_floats(f: usize, h: usize) -> usize {
     h * f + h + h + h + h * h + h + h + h + 4 * h + 4
+}
+
+/// Infer (in_dim, hidden) from a blob's float count. Tries the known hidden
+/// widths against both feature formats; exactly one must match.
+fn infer_dims(len: usize) -> (usize, usize) {
+    let mut found = None;
+    for &h in &HIDDEN_CANDIDATES {
+        for &f in &[FEAT_DIM, FEAT_DIM_REL] {
+            if net_blob_floats(f, h) == len {
+                assert!(found.is_none(), "ambiguous model shape for {len} floats");
+                found = Some((f, h));
+            }
+        }
+    }
+    found.unwrap_or_else(|| panic!("model size {len} floats matches no known (in_dim, hidden)"))
 }
 
 impl Net {
@@ -520,15 +544,7 @@ impl Net {
             .chunks_exact(4)
             .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect();
-        let f = FEAT_DIM;
-        let h = HIDDEN;
-        let expected = net_blob_floats();
-        assert_eq!(
-            floats.len(),
-            expected,
-            "model size mismatch: got {} floats, expected {expected}",
-            floats.len()
-        );
+        let (f, h) = infer_dims(floats.len());
         let mut o = 0;
         let mut take = |n: usize| {
             let s = floats[o..o + n].to_vec();
@@ -545,35 +561,60 @@ impl Net {
         let n2 = take(h);
         let w3 = take(4 * h);
         let b3 = take(4);
-        Net { w1, b1, g1, n1, w2, b2, g2, n2, w3, b3 }
+        Net { f, h, w1, b1, g1, n1, w2, b2, g2, n2, w3, b3 }
     }
 
-    /// Predicts the 4-vector of final score-shares for a position.
+    /// Input dimension = which feature format this net consumes.
+    pub fn in_dim(&self) -> usize {
+        self.f
+    }
+
+    /// Raw forward pass; `x` must be in this net's own feature format.
     /// Zero-allocation (stack buffers) — this is the search-leaf hot path.
     pub fn forward(&self, x: &[f32]) -> [f32; 4] {
-        let h = HIDDEN;
-        let f = FEAT_DIM;
-        let mut y1 = [0.0f32; HIDDEN];
+        let (f, h) = (self.f, self.h);
+        debug_assert_eq!(x.len(), f);
+        let mut y1 = [0.0f32; MAX_HIDDEN];
+        let y1 = &mut y1[..h];
         for i in 0..h {
             y1[i] = self.b1[i] + dot(&self.w1[i * f..(i + 1) * f], x);
         }
-        layernorm(&mut y1, &self.g1, &self.n1);
+        layernorm(y1, &self.g1, &self.n1);
         for v in y1.iter_mut() {
             *v = v.max(0.0);
         }
-        let mut y2 = [0.0f32; HIDDEN];
+        let mut y2 = [0.0f32; MAX_HIDDEN];
+        let y2 = &mut y2[..h];
         for i in 0..h {
-            y2[i] = self.b2[i] + dot(&self.w2[i * h..(i + 1) * h], &y1);
+            y2[i] = self.b2[i] + dot(&self.w2[i * h..(i + 1) * h], y1);
         }
-        layernorm(&mut y2, &self.g2, &self.n2);
+        layernorm(y2, &self.g2, &self.n2);
         for v in y2.iter_mut() {
             *v = v.max(0.0);
         }
         let mut out = [0.0f32; 4];
         for i in 0..4 {
-            out[i] = self.b3[i] + dot(&self.w3[i * h..(i + 1) * h], &y2);
+            out[i] = self.b3[i] + dot(&self.w3[i * h..(i + 1) * h], y2);
         }
         out
+    }
+
+    /// Predicted final score-shares in ABSOLUTE colour order (R,B,Y,G), for any
+    /// net format: picks the right feature extractor and, for perspective-
+    /// relative nets, rotates the output back by the side to move. Only valid
+    /// for non-terminal positions (callers use score_shares at terminals).
+    pub fn value(&self, st: &State) -> [f32; 4] {
+        if self.f == FEAT_DIM_REL {
+            let mover = st.current.expect("value() needs a side to move").idx();
+            let out = self.forward(&features_rel(st));
+            let mut abs = [0.0f32; 4];
+            for k in 0..4 {
+                abs[(mover + k) % 4] = out[k];
+            }
+            abs
+        } else {
+            self.forward(&features(st))
+        }
     }
 }
 
@@ -595,7 +636,7 @@ impl Agent for NetAgent {
             let v = if ns.over {
                 score_shares(&ns.scores)
             } else {
-                self.net.forward(&features(&ns))
+                self.net.value(&ns)
             };
             scores.push(v[me] as f64);
         }

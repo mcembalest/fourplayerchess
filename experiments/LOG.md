@@ -66,6 +66,22 @@ affordable: d4 search is 3.2× cheaper)?
 
 | E10 | **d6 probe** (48g, champion net, depth 6) | paranoid6 1417 / pnet6 1403 — tied | 4.9 CPU-h. Costs: pnet6 3.4s/move start, 19s midgame; paranoid6 0.9–2.4s. |
 
+| E11 | **perspective-relative features** (FEAT_DIM_REL=48: seats reordered me/next/across/prev from mover, one-hot dropped; net outputs mover-rotated, rotated back at eval). rel-g1 = 400g champion teachers, E11a MC → E11b TD(λ=0.65, bootstrap=E11a) | pnet4 1234 vs champ4 1261 vs **paranoid4 1361** | 200g h2h. Rel-net ≈ old champion (within noise) on ONE gen of data vs champion's multi-gen lineage — representation change alone didn't break the ceiling. paranoid4 still beats every net as a d4 leaf. |
+
+**E11 infra (shipped):** Net infers (in_dim, hidden) from blob size (H≤512 ready);
+`Net::value()` dispatches feature format + output rotation, so old/new nets coexist
+in one arena/teacher pool; selfplay writes movers.bin; trainer auto-detects format,
+folds TD in the absolute frame, rotates targets per row. features() refactor
+checksum-verified identical for the old champion; rel↔abs rotation property-tested.
+Old 52-dim gens archived in data/buffer52/.
+
+**The pattern across E9/E10/E11:** every value net trained so far — absolute or
+relative, MC or TD — is a WORSE alpha-beta leaf than counting material, at d4 and
+d6, once move ordering is decent. The value *target* (smooth final score-shares)
+and *features* (no tactical signal: hanging pieces, attacker/defender counts) are
+the suspects. Next candidates: tactical features; hybrid leaf (material + net
+residual); and iterating rel-net gens now that the buffer accumulates.
+
 **E10 conclusion:** the E4 "net leaf pulls ahead with depth" pattern does NOT
 reappear at d6 under killer+ID ordering (at d4 it's also gone, E9). Better move
 ordering closed the gap the net's smooth values used to provide. The value NET

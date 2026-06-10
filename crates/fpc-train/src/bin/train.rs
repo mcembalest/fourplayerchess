@@ -20,7 +20,7 @@
 use std::io::Write;
 
 use fpc_agents::{dot, Net, Rng, HIDDEN, LN_EPS};
-use fpc_core::FEAT_DIM;
+use fpc_core::FEAT_DIM_REL;
 use rayon::prelude::*;
 
 /// Read-only network parameters, passed to the parallel per-sample backward.
@@ -144,10 +144,21 @@ fn read_u32(path: impl AsRef<std::path::Path>) -> Vec<u32> {
         .collect()
 }
 
+/// One generation's files: features, labels, trajectory lens, optional movers
+/// (movers.bin marks perspective-relative data; absent = legacy absolute).
+fn read_gen(dir: &std::path::Path) -> (Vec<f32>, Vec<f32>, Vec<u32>, Option<Vec<u8>>) {
+    let x = read_f32(dir.join("X.bin"));
+    let y = read_f32(dir.join("Y.bin"));
+    let lens = read_u32(dir.join("lens.bin"));
+    let movers = std::fs::read(dir.join("movers.bin")).ok();
+    (x, y, lens, movers)
+}
+
 /// Load training data: every generation under data/buffer/ (oldest..newest by
 /// tag order) if any exist, else the legacy flat files. Returns (x, y, lens,
-/// per-row age) where age = generations back from the newest (newest = 0).
-fn load_data(f: usize) -> (Vec<f32>, Vec<f32>, Vec<u32>, Vec<u32>) {
+/// per-row age, movers, feat_dim); age = generations back from the newest.
+/// movers is empty for absolute-format data and full-length for relative.
+fn load_data() -> (Vec<f32>, Vec<f32>, Vec<u32>, Vec<u32>, Vec<u8>, usize) {
     let mut gens: Vec<std::path::PathBuf> = std::fs::read_dir("data/buffer")
         .map(|rd| {
             rd.filter_map(|e| e.ok().map(|e| e.path()))
@@ -157,28 +168,42 @@ fn load_data(f: usize) -> (Vec<f32>, Vec<f32>, Vec<u32>, Vec<u32>) {
         .unwrap_or_default();
     gens.sort();
     if gens.is_empty() {
-        let x = read_f32("data/X.bin");
-        let y = read_f32("data/Y.bin");
-        let lens = read_u32("data/lens.bin");
-        let age = vec![0u32; y.len() / 4];
-        return (x, y, lens, age);
+        gens.push("data".into());
     }
-    let (mut x, mut y, mut lens, mut age) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let (mut x, mut y, mut lens, mut age, mut movers) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let mut f = 0usize;
     for (gi, dir) in gens.iter().enumerate() {
-        let gx = read_f32(dir.join("X.bin"));
-        let gy = read_f32(dir.join("Y.bin"));
-        let gl = read_u32(dir.join("lens.bin"));
+        let (gx, gy, gl, gm) = read_gen(dir);
         let rows = gy.len() / 4;
-        assert_eq!(gx.len(), rows * f, "bad X size in {}", dir.display());
+        assert!(rows > 0 && gx.len() % rows == 0, "bad X size in {}", dir.display());
+        let gf = gx.len() / rows;
+        if f == 0 {
+            f = gf;
+        }
+        assert_eq!(gf, f, "mixed feature dims across gens ({})", dir.display());
         assert_eq!(gl.iter().map(|&l| l as usize).sum::<usize>(), rows, "bad lens in {}", dir.display());
+        match &gm {
+            Some(m) => assert_eq!(m.len(), rows, "bad movers in {}", dir.display()),
+            None => assert_ne!(
+                f, FEAT_DIM_REL,
+                "relative-format data without movers.bin in {}", dir.display()
+            ),
+        }
         let a = (gens.len() - 1 - gi) as u32;
-        eprintln!("buffer gen {} : {} rows (age {a})", dir.display(), rows);
+        eprintln!("buffer gen {} : {rows} rows, feat {gf} (age {a})", dir.display());
         x.extend_from_slice(&gx);
         y.extend_from_slice(&gy);
         lens.extend_from_slice(&gl);
         age.extend(std::iter::repeat(a).take(rows));
+        if let Some(m) = gm {
+            movers.extend_from_slice(&m);
+        }
     }
-    (x, y, lens, age)
+    if f == FEAT_DIM_REL {
+        assert_eq!(movers.len(), y.len() / 4, "movers must cover all rel rows");
+    }
+    (x, y, lens, age, movers, f)
 }
 
 fn main() -> std::io::Result<()> {
@@ -189,12 +214,15 @@ fn main() -> std::io::Result<()> {
     let bootstrap: Option<&String> = args.get(4);
     let decay: f64 = args.get(5).and_then(|s| s.parse().ok()).unwrap_or(1.0);
 
-    let f = FEAT_DIM;
     let h = HIDDEN;
-    let (x, y, lens, age) = load_data(f);
+    let (x, y, lens, age, movers, f) = load_data();
     let n_all = y.len() / 4;
     assert_eq!(x.len(), n_all * f);
     assert_eq!(lens.iter().map(|&l| l as usize).sum::<usize>(), n_all);
+    // Relative mode: the net sees mover-rotated features and learns mover-
+    // rotated targets; Y / TD folding stay in the absolute colour frame.
+    let rel = f == FEAT_DIM_REL;
+    eprintln!("feature format: {} ({f} dims)", if rel { "perspective-relative" } else { "absolute" });
     // Per-row inclusion probability: decay^age (newest generation always 1).
     let weight: Vec<f64> = age.iter().map(|&a| decay.powi(a as i32)).collect();
 
@@ -208,10 +236,24 @@ fn main() -> std::io::Result<()> {
             }
             Some(path) => {
                 let net = Net::load(path).expect("load bootstrap net");
-                // V(s) for every recorded state (rows are independent -> rayon).
+                assert_eq!(
+                    net.in_dim(), f,
+                    "bootstrap net feature dim {} != data {f}", net.in_dim()
+                );
+                // V(s) for every recorded state (rows are independent -> rayon),
+                // rotated into the absolute frame so TD folding mixes frames
+                // consistently across rows with different movers.
                 let mut v = vec![0.0f32; n_all * 4];
                 v.par_chunks_mut(4).enumerate().for_each(|(r, out)| {
-                    out.copy_from_slice(&net.forward(&x[r * f..r * f + f]));
+                    let raw = net.forward(&x[r * f..r * f + f]);
+                    if rel {
+                        let m = movers[r] as usize;
+                        for k in 0..4 {
+                            out[(m + k) % 4] = raw[k];
+                        }
+                    } else {
+                        out.copy_from_slice(&raw);
+                    }
                 });
                 // Per trajectory, fold λ-returns backward (γ=1, terminal reward = y).
                 let mut start = 0usize;
@@ -237,6 +279,19 @@ fn main() -> std::io::Result<()> {
                 eprintln!("computed TD(λ={lambda}) targets from bootstrap {path}");
             }
         }
+    }
+
+    // Relative mode: rotate the finished absolute targets into each row's
+    // mover frame, matching the net's output convention.
+    if rel {
+        let mut t = vec![0.0f32; n_all * 4];
+        for r in 0..n_all {
+            let m = movers[r] as usize;
+            for k in 0..4 {
+                t[r * 4 + k] = target[r * 4 + (m + k) % 4];
+            }
+        }
+        target = t;
     }
 
     let mut rng = Rng::new(0x5EED);

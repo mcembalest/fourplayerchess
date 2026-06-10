@@ -140,7 +140,7 @@ fn eval_state(st: &State) -> [f64; 4] {
         let s = score_shares(&st.scores);
         return [s[0] as f64, s[1] as f64, s[2] as f64, s[3] as f64];
     }
-    normalize(net().forward(&features(st)))
+    normalize(net().value(st))
 }
 
 /* ---------- agents by difficulty level ---------- */
