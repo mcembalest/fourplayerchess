@@ -1,10 +1,13 @@
 //! Arena: run many seat-rotated games between a pool of agents (in parallel)
 //! and print an Elo-style leaderboard.
 //!
-//!   cargo run -p fpc-arena --release -- [num_games] [max_steps] [model.bin?] [depth] [model2.bin?]
+//!   cargo run -p fpc-arena --release -- [num_games] [max_steps] [model.bin?] [depth] [model2.bin?|-] [alphas?]
 //!
 //! With a second model, its paranoid-d agent joins the pool as `champ<d>` —
 //! direct same-conditions head-to-head between challenger and champion.
+//! Pass `-` for model2 to skip it. `alphas` (comma-separated, e.g. 0.25,1,4)
+//! seats hybrid material+alpha*net leaves built on model.bin; in that mode the
+//! 1-ply net and netsearch2 slots are dropped to concentrate candidate seats.
 //!
 //! Elo is derived by decomposing each 4-player game into pairwise placement
 //! results (the leaner, well-understood path; a proper multiplayer model like
@@ -64,18 +67,36 @@ fn main() {
         AgentKind::Search(2),
         AgentKind::Paranoid(depth),
     ];
+    let alphas: Vec<f64> = args
+        .get(6)
+        .map(|s| s.split(',').map(|a| a.parse().expect("alpha")).collect())
+        .unwrap_or_default();
     if let Some(path) = model_path {
         let net = std::sync::Arc::new(Net::load(path).expect("load model"));
-        pool.push(AgentKind::Net { net: net.clone(), label: "net".into() });
-        pool.push(AgentKind::NetSearch { net: net.clone(), depth: 2, label: "netsearch2".into() });
+        if alphas.is_empty() {
+            pool.push(AgentKind::Net { net: net.clone(), label: "net".into() });
+            pool.push(AgentKind::NetSearch {
+                net: net.clone(),
+                depth: 2,
+                label: "netsearch2".into(),
+            });
+        }
         pool.push(AgentKind::ParanoidNet {
-            net,
+            net: net.clone(),
             depth,
             label: format!("pnet{depth}"),
         });
+        for &a in &alphas {
+            pool.push(AgentKind::ParanoidHybrid {
+                net: net.clone(),
+                depth,
+                alpha: a,
+                label: format!("hyb{depth}a{a}"),
+            });
+        }
         eprintln!("loaded net from {path}");
     }
-    if let Some(path) = args.get(5) {
+    if let Some(path) = args.get(5).filter(|p| p.as_str() != "-") {
         let net2 = std::sync::Arc::new(Net::load(path).expect("load model2"));
         pool.push(AgentKind::ParanoidNet {
             net: net2,

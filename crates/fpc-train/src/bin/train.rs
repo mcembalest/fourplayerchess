@@ -3,7 +3,10 @@
 //! TD; the target is a TD(λ) return (λ=1 reproduces the pure Monte-Carlo label).
 //! Mini-batch SGD + momentum, MSE, small ℓ₂ on the output layer.
 //!
-//!   cargo run -p fpc-train --release --bin train -- [epochs] [max_rows] [lambda] [bootstrap.bin?] [decay]
+//!   cargo run -p fpc-train --release --bin train -- [epochs] [max_rows] [lambda] [bootstrap.bin?] [decay] [buffer_root]
+//!
+//! `buffer_root` (default data/buffer) selects which generation buffer to
+//! train on — feature formats with different dims live in separate roots.
 //!
 //! Data: if data/buffer/<tag>/ generations exist (written by selfplay with a
 //! tag), ALL of them are loaded, oldest..newest by tag order, and each epoch
@@ -20,7 +23,7 @@
 use std::io::Write;
 
 use fpc_agents::{dot, Net, Rng, HIDDEN, LN_EPS};
-use fpc_core::FEAT_DIM_REL;
+use fpc_core::{FEAT_DIM_REL, FEAT_DIM_TAC};
 use rayon::prelude::*;
 
 /// Read-only network parameters, passed to the parallel per-sample backward.
@@ -158,8 +161,8 @@ fn read_gen(dir: &std::path::Path) -> (Vec<f32>, Vec<f32>, Vec<u32>, Option<Vec<
 /// tag order) if any exist, else the legacy flat files. Returns (x, y, lens,
 /// per-row age, movers, feat_dim); age = generations back from the newest.
 /// movers is empty for absolute-format data and full-length for relative.
-fn load_data() -> (Vec<f32>, Vec<f32>, Vec<u32>, Vec<u32>, Vec<u8>, usize) {
-    let mut gens: Vec<std::path::PathBuf> = std::fs::read_dir("data/buffer")
+fn load_data(root: &str) -> (Vec<f32>, Vec<f32>, Vec<u32>, Vec<u32>, Vec<u8>, usize) {
+    let mut gens: Vec<std::path::PathBuf> = std::fs::read_dir(root)
         .map(|rd| {
             rd.filter_map(|e| e.ok().map(|e| e.path()))
                 .filter(|p| p.is_dir())
@@ -185,9 +188,9 @@ fn load_data() -> (Vec<f32>, Vec<f32>, Vec<u32>, Vec<u32>, Vec<u8>, usize) {
         assert_eq!(gl.iter().map(|&l| l as usize).sum::<usize>(), rows, "bad lens in {}", dir.display());
         match &gm {
             Some(m) => assert_eq!(m.len(), rows, "bad movers in {}", dir.display()),
-            None => assert_ne!(
-                f, FEAT_DIM_REL,
-                "relative-format data without movers.bin in {}", dir.display()
+            None => assert!(
+                !is_rotated(f),
+                "rotated-format data without movers.bin in {}", dir.display()
             ),
         }
         let a = (gens.len() - 1 - gi) as u32;
@@ -200,10 +203,16 @@ fn load_data() -> (Vec<f32>, Vec<f32>, Vec<u32>, Vec<u32>, Vec<u8>, usize) {
             movers.extend_from_slice(&m);
         }
     }
-    if f == FEAT_DIM_REL {
+    if is_rotated(f) {
         assert_eq!(movers.len(), y.len() / 4, "movers must cover all rel rows");
     }
     (x, y, lens, age, movers, f)
+}
+
+/// Formats whose features and targets are rotated into the mover's frame
+/// (perspective-relative and its tactical extension).
+fn is_rotated(f: usize) -> bool {
+    f == FEAT_DIM_REL || f == FEAT_DIM_TAC
 }
 
 fn main() -> std::io::Result<()> {
@@ -213,15 +222,16 @@ fn main() -> std::io::Result<()> {
     let mut lambda: f32 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(1.0);
     let bootstrap: Option<&String> = args.get(4);
     let decay: f64 = args.get(5).and_then(|s| s.parse().ok()).unwrap_or(1.0);
+    let root = args.get(6).map(|s| s.as_str()).unwrap_or("data/buffer");
 
     let h = HIDDEN;
-    let (x, y, lens, age, movers, f) = load_data();
+    let (x, y, lens, age, movers, f) = load_data(root);
     let n_all = y.len() / 4;
     assert_eq!(x.len(), n_all * f);
     assert_eq!(lens.iter().map(|&l| l as usize).sum::<usize>(), n_all);
     // Relative mode: the net sees mover-rotated features and learns mover-
     // rotated targets; Y / TD folding stay in the absolute colour frame.
-    let rel = f == FEAT_DIM_REL;
+    let rel = is_rotated(f);
     eprintln!("feature format: {} ({f} dims)", if rel { "perspective-relative" } else { "absolute" });
     // Per-row inclusion probability: decay^age (newest generation always 1).
     let weight: Vec<f64> = age.iter().map(|&a| decay.powi(a as i32)).collect();

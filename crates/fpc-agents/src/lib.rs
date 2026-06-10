@@ -46,6 +46,9 @@ pub enum AgentKind {
     Paranoid(u32),
     /// Paranoid alpha-beta with the value net as leaf eval.
     ParanoidNet { net: Arc<Net>, depth: u32, label: String },
+    /// Paranoid alpha-beta with a hybrid leaf: material shares + alpha * net
+    /// shares. alpha=0 ~ pure material, alpha→∞ ~ pure net.
+    ParanoidHybrid { net: Arc<Net>, depth: u32, alpha: f64, label: String },
 }
 
 impl AgentKind {
@@ -58,6 +61,7 @@ impl AgentKind {
             AgentKind::NetSearch { label, .. } => label.clone(),
             AgentKind::Paranoid(d) => format!("paranoid{d}"),
             AgentKind::ParanoidNet { label, .. } => label.clone(),
+            AgentKind::ParanoidHybrid { label, .. } => label.clone(),
         }
     }
     /// Deterministic agent (argmax move selection).
@@ -87,12 +91,21 @@ impl AgentKind {
             }),
             AgentKind::Paranoid(d) => Box::new(ParanoidAgent {
                 net: None,
+                alpha: None,
                 depth: (*d).max(1),
                 rng: Rng::new(seed),
                 temp,
             }),
             AgentKind::ParanoidNet { net, depth, .. } => Box::new(ParanoidAgent {
                 net: Some(net.clone()),
+                alpha: None,
+                depth: (*depth).max(1),
+                rng: Rng::new(seed),
+                temp,
+            }),
+            AgentKind::ParanoidHybrid { net, depth, alpha, .. } => Box::new(ParanoidAgent {
+                net: Some(net.clone()),
+                alpha: Some(*alpha),
                 depth: (*depth).max(1),
                 rng: Rng::new(seed),
                 temp,
@@ -297,6 +310,30 @@ fn net_eval(net: &Net, st: &State) -> [f64; 4] {
     o
 }
 
+/// Hybrid leaf: material normalized to shares + alpha * net shares. Both terms
+/// live on the same 0..1 share scale, so alpha directly weights how much the
+/// net's opinion can override material counting. Terminal nodes return true
+/// score shares (via net_eval's terminal branch).
+fn hybrid_eval(net: &Net, st: &State, alpha: f64) -> [f64; 4] {
+    if st.over {
+        // True score shares, scaled to the non-terminal range 0..(1+alpha) so
+        // terminal and non-terminal leaves compare on one scale.
+        let mut s = net_eval(net, st);
+        for v in &mut s {
+            *v *= 1.0 + alpha;
+        }
+        return s;
+    }
+    let m = material_eval(st);
+    let msum: f64 = m.iter().sum::<f64>().max(1e-9);
+    let nv = net_eval(net, st);
+    let mut o = [0.0f64; 4];
+    for i in 0..4 {
+        o[i] = m[i] / msum + alpha * nv[i];
+    }
+    o
+}
+
 impl Agent for NetSearchAgent {
     fn select(&mut self, st: &State) -> Move {
         let net = self.net.clone();
@@ -312,6 +349,9 @@ impl Agent for NetSearchAgent {
 /// prune). Less myopic than depth-2 maxⁿ (which only sees one opponent reply).
 pub struct ParanoidAgent {
     net: Option<Arc<Net>>,
+    /// Some(a) = hybrid leaf (material shares + a * net shares); None = pure
+    /// net leaf if `net` is set, else pure material.
+    alpha: Option<f64>,
     depth: u32,
     rng: Rng,
     temp: f64,
@@ -405,9 +445,11 @@ impl Agent for ParanoidAgent {
     fn select(&mut self, st: &State) -> Move {
         let me = st.current.unwrap().idx();
         let net = self.net.clone();
-        let ev = |s: &State| match &net {
-            Some(n) => net_eval(n, s),
-            None => material_eval(s),
+        let alpha = self.alpha;
+        let ev = |s: &State| match (&net, alpha) {
+            (Some(n), Some(a)) => hybrid_eval(n, s, a),
+            (Some(n), None) => net_eval(n, s),
+            (None, _) => material_eval(s),
         };
         let mut moves = ordered_moves(st);
         let d = self.depth.saturating_sub(1);
@@ -521,7 +563,7 @@ pub fn net_blob_floats(f: usize, h: usize) -> usize {
 fn infer_dims(len: usize) -> (usize, usize) {
     let mut found = None;
     for &h in &HIDDEN_CANDIDATES {
-        for &f in &[FEAT_DIM, FEAT_DIM_REL] {
+        for &f in &[FEAT_DIM, FEAT_DIM_REL, FEAT_DIM_TAC] {
             if net_blob_floats(f, h) == len {
                 assert!(found.is_none(), "ambiguous model shape for {len} floats");
                 found = Some((f, h));
@@ -604,9 +646,13 @@ impl Net {
     /// relative nets, rotates the output back by the side to move. Only valid
     /// for non-terminal positions (callers use score_shares at terminals).
     pub fn value(&self, st: &State) -> [f32; 4] {
-        if self.f == FEAT_DIM_REL {
+        if self.f == FEAT_DIM_REL || self.f == FEAT_DIM_TAC {
             let mover = st.current.expect("value() needs a side to move").idx();
-            let out = self.forward(&features_rel(st));
+            let out = if self.f == FEAT_DIM_TAC {
+                self.forward(&features_tac(st))
+            } else {
+                self.forward(&features_rel(st))
+            };
             let mut abs = [0.0f32; 4];
             for k in 0..4 {
                 abs[(mover + k) % 4] = out[k];

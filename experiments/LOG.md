@@ -75,6 +75,10 @@ folds TD in the absolute frame, rotates targets per row. features() refactor
 checksum-verified identical for the old champion; rel↔abs rotation property-tested.
 Old 52-dim gens archived in data/buffer52/.
 
+| E12 | **hybrid leaf sweep** (ParanoidHybrid: material shares + α·net shares, champion net, d4, α∈{0.25,1,4}) | paranoid4 1202 > hyb a.25 1144 > hyb a1 1120 > hyb a4 1102 > pnet4 1044 | 240g. **Monotonic in α: the net's value is pure noise relative to material at d4** — no orthogonal signal to blend in (even 20% net-weight ≈ −60). Kills "net carries hidden positional signal"; the value function itself lacks usable content → features/target, not blending or iteration, are the lever. |
+
+| E13 | **tactical features** (FEAT_DIM_TAC=60 = rel + per-seat attacked value / hanging value / attacked count, via new `defended()` reverse probe). tac-g1 = 400g champion teachers (same seeds as rel-g1), E13a MC (mse .0089) → E13b TD(λ=0.65) | **pnet4 1264 > paranoid4 1204 > champ4 1148** | 200g h2h, same protocol as E11 (rel-net was −127 vs paranoid4; tac-net is +60 → **~+180 swing from 12 tactical dims**). FIRST net to beat the material leaf since killer+ID ordering, and +116 over the old champion. Confirms the E12 diagnosis: the nets weren't missing depth or data — they couldn't see tactics. Leaf cost ~+50% (attack probes); worth it. **Champion promotion available (model_tac_b.bin) — needs Max's call (wasm embed).** Next: tac-gen-2 iterate, then optimize tac_stats if it holds. |
+
 **The pattern across E9/E10/E11:** every value net trained so far — absolute or
 relative, MC or TD — is a WORSE alpha-beta leaf than counting material, at d4 and
 d6, once move ordering is decent. The value *target* (smooth final score-shares)

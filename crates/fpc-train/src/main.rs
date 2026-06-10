@@ -7,7 +7,10 @@
 //!                                        targets into each row's frame)
 //!   lens.bin   (num_traj * u32)          length of each trajectory (for TD(λ))
 //!
-//!   cargo run -p fpc-train --release -- [num_games] [max_steps] [model.bin?] [depth] [eps] [tag?]
+//!   cargo run -p fpc-train --release -- [num_games] [max_steps] [model.bin?] [depth] [eps] [tag?] [fmt?]
+//!
+//! `fmt` = `tac` records FEAT_DIM_TAC features (rel + tactical block);
+//! default records FEAT_DIM_REL. The trainer detects the dim from row size.
 //!
 //! With a `tag` (6th arg) the files go to data/buffer/<tag>/ — an append-only
 //! replay buffer of generations the trainer reads in full (recency-weighted).
@@ -32,6 +35,7 @@ fn play_and_record(
     seed: u64,
     max_steps: usize,
     eps: f64,
+    tac: bool,
 ) -> (Vec<f32>, Vec<u8>, [f32; 4], u32) {
     let mut agents: [Box<dyn Agent>; 4] = [
         seats[0].build(seed ^ 0x11),
@@ -46,7 +50,11 @@ fn play_and_record(
     let mut steps = 0;
     let mut len = 0u32;
     while !st.over && steps < max_steps {
-        xs.extend_from_slice(&features_rel(&st));
+        if tac {
+            xs.extend_from_slice(&features_tac(&st));
+        } else {
+            xs.extend_from_slice(&features_rel(&st));
+        }
         let c = st.current.unwrap();
         movers.push(c.idx() as u8);
         len += 1;
@@ -68,10 +76,16 @@ fn main() -> std::io::Result<()> {
     let model_path: Option<&String> = args.get(3);
     let depth: u32 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(0);
     let eps: f64 = args.get(5).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+    // A tag containing '/' is used as the output dir verbatim (lets feature
+    // formats keep separate buffer roots, e.g. data/buffer-tac/g1 — the
+    // trainer asserts uniform dims across all gens under one root).
     let out_dir = match args.get(6) {
+        Some(tag) if tag.contains('/') => tag.clone(),
         Some(tag) => format!("data/buffer/{tag}"),
         None => "data".to_string(),
     };
+    let tac = args.get(7).map(|s| s == "tac").unwrap_or(false);
+    let feat_dim = if tac { FEAT_DIM_TAC } else { FEAT_DIM_REL };
 
     // Build the per-game seat fields. With a model + search depth, the strong
     // paranoid agents (which beat the heuristic) are the teachers — the value
@@ -132,6 +146,7 @@ fn main() -> std::io::Result<()> {
                 (g as u64).wrapping_mul(0x9E3779B97F4A7C15) ^ 0xDEAD,
                 max_steps,
                 eps,
+                tac,
             );
             let c = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
             if c % step == 0 || c == num_games {
@@ -166,8 +181,8 @@ fn main() -> std::io::Result<()> {
     fl.flush()?;
 
     eprintln!(
-        "wrote {} positions from {} games (FEAT_DIM_REL={}) -> {out_dir}/{{X,Y,movers,lens}}.bin",
-        n, num_games, FEAT_DIM_REL
+        "wrote {} positions from {} games (feat_dim={}) -> {out_dir}/{{X,Y,movers,lens}}.bin",
+        n, num_games, feat_dim
     );
     Ok(())
 }

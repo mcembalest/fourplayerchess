@@ -67,7 +67,18 @@ fn cell_at(b: &Board, r: i32, c: i32) -> Cell {
 /// the target (reverse leaper/ray lookup, ~40 probes) instead of scanning all 196
 /// cells. Validated equivalent to the full scan by tests/diff.rs.
 pub fn attacked(b: &Board, elim: &[bool; 4], tr: i32, tc: i32, def_color: Color) -> bool {
-    let is_enemy = |p: Piece| p.color != def_color && !elim[p.color.idx()];
+    attacked_by(b, tr, tc, |p| p.color != def_color && !elim[p.color.idx()])
+}
+
+/// Is (tr,tc) covered by another piece of `color` (same reverse lookup)? The
+/// piece standing on (tr,tc) itself never matches — probes look outward only.
+pub fn defended(b: &Board, tr: i32, tc: i32, color: Color) -> bool {
+    attacked_by(b, tr, tc, |p| p.color == color)
+}
+
+/// Reverse attack probe with a caller-chosen attacker predicate.
+#[inline]
+fn attacked_by<F: Fn(Piece) -> bool>(b: &Board, tr: i32, tc: i32, is_enemy: F) -> bool {
     // knight attackers
     for &(dr, dc) in KNIGHT.iter() {
         if let Some(p) = cell_at(b, tr + dr, tc + dc) {
@@ -87,12 +98,9 @@ pub fn attacked(b: &Board, elim: &[bool; 4], tr: i32, tc: i32, def_color: Color)
     // pawn attackers: an enemy pawn of colour `e` attacks (tr,tc) iff it sits at
     // (tr-cdr, tc-cdc) for one of e's capture offsets.
     for &e in ORDER.iter() {
-        if e == def_color || elim[e.idx()] {
-            continue;
-        }
         for &(cdr, cdc) in pawn_caps(e).iter() {
             if let Some(p) = cell_at(b, tr - cdr, tc - cdc) {
-                if p.kind == Kind::P && p.color == e {
+                if p.kind == Kind::P && p.color == e && is_enemy(p) {
                     return true;
                 }
             }

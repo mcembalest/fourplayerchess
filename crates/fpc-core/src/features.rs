@@ -31,11 +31,18 @@
 //!     base+10    king in check (0/1)
 //!     base+11    king safety / 8
 //! => 4*12 = 48
+//!
+//! `features_tac` (FEAT_DIM_TAC=60): `features_rel` plus a tactical block of 3
+//! dims per relative seat k, base = 48 + k*3:
+//!     base+0     own piece value under enemy attack / 24
+//!     base+1     hanging value (attacked and not defended) / 24
+//!     base+2     attacked piece count / 8
 
 use crate::*;
 
 pub const FEAT_DIM: usize = 52;
 pub const FEAT_DIM_REL: usize = 48;
+pub const FEAT_DIM_TAC: usize = 60;
 
 /// Raw (unnormalized) per-colour stats behind both feature formats.
 struct SeatStats {
@@ -173,6 +180,50 @@ pub fn features_rel(st: &State) -> [f32; FEAT_DIM_REL] {
     f
 }
 
+/// Per-colour tactical stats: [attacked piece value, hanging value (attacked
+/// and not defended by own colour), attacked piece count]. Reverse attack
+/// probes per piece; the defended probe only runs for attacked pieces.
+fn tac_stats(st: &State) -> [[f32; 3]; 4] {
+    let b = &st.board;
+    let mut out = [[0.0f32; 3]; 4];
+    for r in 0..14i32 {
+        for c in 0..14i32 {
+            let Some(p) = b[r as usize][c as usize] else { continue };
+            let ci = p.color.idx();
+            if st.eliminated[ci] {
+                continue;
+            }
+            if attacked(b, &st.eliminated, r, c, p.color) {
+                let v = value(p.kind) as f32;
+                out[ci][0] += v;
+                out[ci][2] += 1.0;
+                if !defended(b, r, c, p.color) {
+                    out[ci][1] += v;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// `features_rel` plus per-seat tactical pressure (see module docs). Same
+/// mover-relative seat order and output convention as `features_rel`.
+pub fn features_tac(st: &State) -> [f32; FEAT_DIM_TAC] {
+    let mover = st.current.expect("features_tac needs a side to move").idx();
+    let rel = features_rel(st);
+    let t = tac_stats(st);
+    let mut f = [0.0f32; FEAT_DIM_TAC];
+    f[..FEAT_DIM_REL].copy_from_slice(&rel);
+    for k in 0..4 {
+        let ci = (mover + k) % 4;
+        let base = FEAT_DIM_REL + k * 3;
+        f[base + 0] = t[ci][0] / 24.0;
+        f[base + 1] = t[ci][1] / 24.0;
+        f[base + 2] = t[ci][2] / 8.0;
+    }
+    f
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,6 +258,36 @@ mod tests {
             st.make_move(mv);
         }
         assert!(checked > 100, "too few positions checked: {checked}");
+    }
+
+    /// features_tac = features_rel prefix + sane tactical block (hanging value
+    /// never exceeds attacked value; counts/values move together).
+    #[test]
+    fn tac_extends_rel() {
+        let mut st = State::new_game();
+        let mut rng = 0xBEEF_u64;
+        let mut saw_attacked = false;
+        for _ in 0..200 {
+            if st.over {
+                break;
+            }
+            let rel = features_rel(&st);
+            let tac = features_tac(&st);
+            assert_eq!(&tac[..FEAT_DIM_REL], &rel[..]);
+            for k in 0..4 {
+                let base = FEAT_DIM_REL + k * 3;
+                let (av, hv, ac) = (tac[base], tac[base + 1], tac[base + 2]);
+                assert!(hv <= av + 1e-6, "hanging {hv} > attacked {av}");
+                assert_eq!(av > 0.0, ac > 0.0, "value/count mismatch");
+                if av > 0.0 {
+                    saw_attacked = true;
+                }
+            }
+            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let mv = st.current_legal[(rng >> 33) as usize % st.current_legal.len()];
+            st.make_move(mv);
+        }
+        assert!(saw_attacked, "no attacked pieces in 200 random plies?");
     }
 }
 
